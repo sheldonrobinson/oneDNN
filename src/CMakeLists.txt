@@ -215,19 +215,21 @@ foreach(object_library IN LISTS LIB_DEPS)
 endforeach()
 
 set(LIB_EXPORT_NAME "${LIB_PACKAGE_NAME}-targets")
-install(TARGETS ${LIB_PACKAGE_NAME}
-    EXPORT "${LIB_EXPORT_NAME}"
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+if(DNNL_INSTALL)
+	install(TARGETS ${LIB_PACKAGE_NAME}
+		EXPORT "${LIB_EXPORT_NAME}"
+		RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+		LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+		ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
-# If only Cmake could preserve the directory hierarchy...
-foreach(header ${HEADERS_ROOT})
-    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/")
-endforeach()
-foreach(header ${HEADERS_SUBDIR})
-    install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/oneapi/dnnl/")
-endforeach()
+	# If only Cmake could preserve the directory hierarchy...
+	foreach(header ${HEADERS_ROOT})
+		install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/")
+	endforeach()
+	foreach(header ${HEADERS_SUBDIR})
+		install(FILES ${header} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/oneapi/dnnl/")
+	endforeach()
+endif()
 
 string(TOUPPER "${LIB_PACKAGE_NAME}::" LIB_NAMESPACE)
 if(DNNL_INSTALL_MODE STREQUAL "BUNDLE" AND WIN32)
@@ -253,57 +255,60 @@ configure_package_config_file(
     "../cmake/config.cmake.in"
     "${LIB_CONFIG_FILE}"
     INSTALL_DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-install(FILES ${LIB_CONFIG_FILE} ${LIB_VERSION_FILE}
-    DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-install(EXPORT ${LIB_EXPORT_NAME}
-    NAMESPACE ${LIB_NAMESPACE}
-    DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+if(DNNL_INSTALL)
+	install(FILES ${LIB_CONFIG_FILE} ${LIB_VERSION_FILE}
+		DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+	install(EXPORT ${LIB_EXPORT_NAME}
+		NAMESPACE ${LIB_NAMESPACE}
+		DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+endif()
 
 # Apply a workaround to CMake config file to make it work with symlinks.
 # The patched config file is only used in oneAPI binary distribution.
-if(UNIX AND DNNL_INSTALL_MODE STREQUAL "BUNDLE")
-    install(CODE "file(READ \"${CMAKE_INSTALL_PREFIX}/${LIB_CONFIG_INSTALL_DIR}/${LIB_PACKAGE_NAME}-targets.cmake\" TARGETS_CONTENT)")
-    install(CODE "string(REPLACE
-                         \"get_filename_component(_IMPORT_PREFIX \\\"\\\${CMAKE_CURRENT_LIST_FILE}\\\" PATH)\"
-                         \"get_filename_component(_IMPORT_PREFIX \\\"\\\${CMAKE_CURRENT_LIST_FILE}\\\" REALPATH)\\nget_filename_component(_IMPORT_PREFIX \\\"\\\${_IMPORT_PREFIX}\\\" PATH)\"
-                         TARGETS_CONTENT \"\${TARGETS_CONTENT}\")")
-    install(CODE "file(WRITE \"${CMAKE_INSTALL_PREFIX}/${LIB_CONFIG_INSTALL_DIR}/${LIB_PACKAGE_NAME}-targets.cmake\" \"\${TARGETS_CONTENT}\")")
-endif()
+if(DNNL_INSTALL)
+	if(UNIX AND DNNL_INSTALL_MODE STREQUAL "BUNDLE")
+		install(CODE "file(READ \"${CMAKE_INSTALL_PREFIX}/${LIB_CONFIG_INSTALL_DIR}/${LIB_PACKAGE_NAME}-targets.cmake\" TARGETS_CONTENT)")
+		install(CODE "string(REPLACE
+							 \"get_filename_component(_IMPORT_PREFIX \\\"\\\${CMAKE_CURRENT_LIST_FILE}\\\" PATH)\"
+							 \"get_filename_component(_IMPORT_PREFIX \\\"\\\${CMAKE_CURRENT_LIST_FILE}\\\" REALPATH)\\nget_filename_component(_IMPORT_PREFIX \\\"\\\${_IMPORT_PREFIX}\\\" PATH)\"
+							 TARGETS_CONTENT \"\${TARGETS_CONTENT}\")")
+		install(CODE "file(WRITE \"${CMAKE_INSTALL_PREFIX}/${LIB_CONFIG_INSTALL_DIR}/${LIB_PACKAGE_NAME}-targets.cmake\" \"\${TARGETS_CONTENT}\")")
+	endif()
 
-# Install custom find modules for transitive dependencies
-if(DNNL_CPU_THREADING_RUNTIME STREQUAL "TBB")
-    if(WIN32)
-        install(FILES "../cmake/win/TBBConfig.cmake" RENAME "FindTBB.cmake"
-            DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-    elseif(APPLE)
-        install(FILES "../cmake/mac/TBBConfig.cmake" RENAME "FindTBB.cmake"
-            DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-    elseif(UNIX)
-        install(FILES "../cmake/lnx/TBBConfig.cmake" RENAME "FindTBB.cmake"
-            DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-    endif()
-endif()
+	# Install custom find modules for transitive dependencies
+	if(DNNL_CPU_THREADING_RUNTIME STREQUAL "TBB")
+		if(WIN32)
+			install(FILES "../cmake/win/TBBConfig.cmake" RENAME "FindTBB.cmake"
+				DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+		elseif(APPLE)
+			install(FILES "../cmake/mac/TBBConfig.cmake" RENAME "FindTBB.cmake"
+				DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+		elseif(UNIX)
+			install(FILES "../cmake/lnx/TBBConfig.cmake" RENAME "FindTBB.cmake"
+				DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+		endif()
+	endif()
 
-if(DNNL_GPU_RUNTIME STREQUAL "OCL" OR (DNNL_GPU_SYCL AND DNNL_GPU_VENDOR STREQUAL "INTEL"))
-    install(FILES
-        "../cmake/FindOpenCL.cmake"
-        DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-endif()
+	if(DNNL_GPU_RUNTIME STREQUAL "OCL" OR (DNNL_GPU_SYCL AND DNNL_GPU_VENDOR STREQUAL "INTEL"))
+		install(FILES
+			"../cmake/FindOpenCL.cmake"
+			DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+	endif()
 
-if(DNNL_BLAS_VENDOR STREQUAL "ACCELERATE")
-    install(FILES
-    "../cmake/FindBLAS.cmake"
-    DESTINATION ${LIB_CONFIG_INSTALL_DIR})
-endif()
+	if(DNNL_BLAS_VENDOR STREQUAL "ACCELERATE")
+		install(FILES
+		"../cmake/FindBLAS.cmake"
+		DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+	endif()
 
-if(DNNL_SYCL_CUDA)
-    install(FILES
-        "../cmake/FindcuBLAS.cmake"
-        "../cmake/FindcublasLt.cmake"
-        "../cmake/FindcuDNN.cmake"
-        DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+	if(DNNL_SYCL_CUDA)
+		install(FILES
+			"../cmake/FindcuBLAS.cmake"
+			"../cmake/FindcublasLt.cmake"
+			"../cmake/FindcuDNN.cmake"
+			DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+	endif()
 endif()
-
 # On Windows we need to add dnnl.dll path to CTESTCONFIG_PATH which is later
 # passed to ctest and Visual Studio solutions
 if(WIN32)

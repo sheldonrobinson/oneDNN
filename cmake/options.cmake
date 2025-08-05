@@ -73,6 +73,7 @@ option(DNNL_BUILD_FOR_CI
     OFF)
 option(DNNL_DEV_MODE "Enables internal tracing capabilities" OFF)
 option(DNNL_WERROR "treat warnings as errors" OFF)
+option(DNNL_INSTALL "Install applications and libraries" OFF)
 
 set(DNNL_TEST_SET "CI" CACHE STRING
     "specifies the testing coverage. The variable consists of two parts:
