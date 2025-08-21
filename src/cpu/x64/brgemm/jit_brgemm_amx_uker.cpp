@@ -388,9 +388,21 @@ private:
         void reset() { vec = 0; }
     };
 
+    struct prf_sprinkled_t {
+        std::vector<size_t> prefetch_offsets;
+        size_t current_prefetch_idx;
+        void reset() {
+            prefetch_offsets.clear();
+            current_prefetch_idx = 0;
+        }
+    };
+
     // iteration map
     iteration_map_t imap_;
 
+    prf_sprinkled_t prf_sprinkled_a, prf_sprinkled_b;
+    size_t num_amx_ops;
+    size_t current_num_amx_ops;
     // interleave stores
     bool use_ils_ = false;
     bool was_prev_bi_ = false;
@@ -535,6 +547,8 @@ private:
     void maybe_tileloadd_nt(
             brgemm_iteration_t &bi, matrix_kind_t mk, int xdb, size_t offset);
 
+    void maybe_sprinkle_prefetches();
+
     void tdpbxxd(brgemm_iteration_t &bi, int bdb_idx, int ldb_idx,
             bool do_pre_tilestore, bool do_post_tilestore);
 
@@ -569,10 +583,21 @@ private:
                 && !skip_accumulation);
     }
 
-    size_t A_offset(const brgemm_iteration_t &bi, int bdb) const noexcept;
-    size_t B_offset(const brgemm_iteration_t &bi, int ldb) const noexcept;
+    size_t A_offset(
+            const brgemm_iteration_t &bi, int bdb, int rdb = 0) const noexcept;
+
+    size_t A_offset_line(const brgemm_iteration_t &bi, int bdb, int rdb = 0,
+            int bd_elem_idx = 0) const noexcept;
+
+    size_t B_offset(
+            const brgemm_iteration_t &bi, int ldb, int rdb = 0) const noexcept;
+
+    size_t B_offset_line(const brgemm_iteration_t &bi, int ldb, int rdb = 0,
+            int rd_elem_idx = 0) const noexcept;
+
     size_t C_offset(const brgemm_iteration_t &bi, int bdb, int inp_bd,
             int ldb) const noexcept;
+
     size_t D_offset(const brgemm_iteration_t &bi, int bdb, int inp_bd,
             int ldb) const noexcept;
 
@@ -705,23 +730,28 @@ int jit_brgemm_amx_uker_base_t::skipped_bd_mask(int inp_bd) noexcept {
 }
 
 size_t jit_brgemm_amx_uker_base_t::A_offset(
-        const brgemm_iteration_t &bi, int bdb) const noexcept {
+        const brgemm_iteration_t &bi, int bdb, int rdb) const noexcept {
     const auto bs_offs = (brg.type == brgemm_static_offs)
             ? brg.brgattr.static_offsets[bi.bsi->idx].offset.A
             : 0;
     const auto bdb_offs
             = ununroll_bd_loop ? bi.bdi->rel_pos(bdb) : bi.bdi->pos(bdb);
     return bdb_offs * LDA2_size_ + bs_offs
-            + bi.rdi->pos(0) * brg.rd_block * brg.typesize_A;
+            + bi.rdi->pos(rdb) * brg.rd_block * brg.typesize_A;
+}
+
+size_t jit_brgemm_amx_uker_base_t::A_offset_line(const brgemm_iteration_t &bi,
+        int bdb, int rdb, int bd_elem_idx) const noexcept {
+    return A_offset(bi, bdb, rdb) + bd_elem_idx * LDA2_size_;
 }
 
 size_t jit_brgemm_amx_uker_base_t::B_offset(
-        const brgemm_iteration_t &bi, int ldb) const noexcept {
+        const brgemm_iteration_t &bi, int ldb, int rdb) const noexcept {
     const auto bs_offs = (brg.type == brgemm_static_offs)
             ? brg.brgattr.static_offsets[bi.bsi->idx].offset.B
             : 0;
 
-    const auto rdb_B_offset = bi.rdi->pos(0) * brg.rd_block * LDB_size_;
+    const auto rdb_B_offset = bi.rdi->pos(rdb) * brg.rd_block * LDB_size_;
 
     const auto ldb_offs = bi.ldi->pos(ldb) * brg.ld_block;
     const auto ldb_B_offset = brg.typesize_B
@@ -729,6 +759,11 @@ size_t jit_brgemm_amx_uker_base_t::B_offset(
                     + (ldb_offs % brg.LDB) * brg.rd_step);
 
     return rdb_B_offset + ldb_B_offset + bs_offs;
+}
+
+size_t jit_brgemm_amx_uker_base_t::B_offset_line(const brgemm_iteration_t &bi,
+        int ldb, int rdb, int rd_elem_idx) const noexcept {
+    return B_offset(bi, ldb, rdb) + rd_elem_idx * LDB_size_;
 }
 
 size_t jit_brgemm_amx_uker_base_t::C_offset(const brgemm_iteration_t &bi,
@@ -1070,13 +1105,66 @@ void jit_brgemm_amx_uker_base_t::prepare_post_ops_registers(
         }
     }
 
-    if (brg.with_scales) {
-        mov(reg_scales, ptr[param1 + GET_OFF(ptr_scales)]);
+    if (brg.with_src_scales) {
+        mov(reg_scales, ptr[param1 + GET_OFF(ptr_src_scales)]);
+        for (int ldb = 0; ldb < ldi->block2(); ldb++) {
+            // Hard-coded assumption for a single src scale value being
+            // supported, thus, offset is 0.
+            auto scales_ptr = EVEX_compress_addr(reg_scales, /* offset = */ 0);
+            auto k_mask = ldi->is_tail(ldb) ? ld_tail_mask : ld_full_mask;
+            vbroadcastss(zmm_scales(ldb) | k_mask | T_z, scales_ptr);
+        }
+    }
+
+    if (brg.with_wei_scales) {
+        mov(reg_scales, ptr[param1 + GET_OFF(ptr_wei_scales)]);
         for (int ldb = 0; ldb < ldi->block2(); ldb++) {
             auto scales_ptr = EVEX_compress_addr(
                     reg_scales, scales_offset(ldi->pos(ldb)));
             auto k_mask = ldi->is_tail(ldb) ? ld_tail_mask : ld_full_mask;
-            vmovups(zmm_scales(ldb) | k_mask | T_z, scales_ptr);
+            const bool is_single_scale = !brg.is_oc_scale;
+
+            const auto zmm_scale = zmm_scales(ldb);
+            const auto zmm_scale_masked = zmm_scales(ldb) | k_mask | T_z;
+
+            if (is_single_scale) {
+                // Single value is not anticipated to be of any other type.
+                assert(brg.dt_wei_scales == data_type::f32);
+                if (brg.with_src_scales) {
+                    // Src scales are set, need to multiply by their value.
+                    auto scales_bcast_ptr = EVEX_compress_addr(reg_scales,
+                            scales_offset(ldi->pos(ldb)), /* bcast = */ true);
+                    vmulps(zmm_scale_masked, zmm_scale, scales_bcast_ptr);
+                } else {
+                    // No src scales, just load a single value.
+                    vbroadcastss(zmm_scale_masked, scales_ptr);
+                }
+                continue;
+            }
+
+            const auto zmm_wei_scale = zmm_tmp_1();
+            const auto zmm_wei_scale_masked = zmm_wei_scale | k_mask | T_z;
+            switch (brg.dt_wei_scales) {
+                case data_type::f32:
+                    uni_vmovups(zmm_wei_scale_masked, scales_ptr);
+                    break;
+                case data_type::bf16:
+                    uni_vpmovzxwd(zmm_wei_scale_masked, scales_ptr);
+                    uni_vpslld(zmm_wei_scale, zmm_wei_scale, 16);
+                    break;
+                case data_type::f16:
+                    vcvtph2ps(zmm_wei_scale_masked, scales_ptr);
+                    break;
+                default: assert(!"unsupported wei_scales data type");
+            }
+
+            if (brg.with_src_scales) {
+                // Src scales are set, need to multiply by their value.
+                vmulps(zmm_scale_masked, zmm_scale, zmm_wei_scale);
+            } else {
+                // No src scales, just load a vector of values.
+                vmovups(zmm_scale, zmm_wei_scale);
+            }
         }
     }
 }
@@ -1257,6 +1345,7 @@ void jit_brgemm_amx_uker_base_t::prefetching(
     maybe_prefetch_B(prf1B);
     maybe_prefetch_B(prf2B);
     maybe_prefetch_B(prfntaB);
+    if (!prefetch_all) maybe_sprinkle_prefetches();
 }
 
 void jit_brgemm_amx_uker_base_t::apply_comp_pad_to_vector(
@@ -1360,7 +1449,7 @@ void jit_brgemm_amx_uker_base_t::process_output_range(
         }
     }
 
-    if (brg.with_scales) {
+    if (brg.with_src_scales || brg.with_wei_scales) {
         for (auto bd = bd_start; bd < bd_finish; bd++) {
             if (!is_out_bd(bi.bdi, bdb, bd)) continue;
 
@@ -1676,6 +1765,36 @@ void jit_brgemm_amx_uker_base_t::set_A_B_matrices() {
     }
 }
 
+void jit_brgemm_amx_uker_base_t::maybe_sprinkle_prefetches() {
+    auto jit_prefetches = [&](prf_sprinkled_t &prf_sprinkled,
+                                  Xbyak::Reg64 base) {
+        // Calculate the number of cache lines to jit
+        float total_cache_lines_to_prefetch
+                = (float)prf_sprinkled.prefetch_offsets.size();
+        float cache_lines_per_amx_op
+                = total_cache_lines_to_prefetch / num_amx_ops;
+        int num_prefetches_to_jit
+                = (int)((current_num_amx_ops + 1) * cache_lines_per_amx_op)
+                - (int)(current_num_amx_ops * cache_lines_per_amx_op);
+
+        // Jit the prefetches
+        for (size_t i = prf_sprinkled.current_prefetch_idx;
+                i < num_prefetches_to_jit + prf_sprinkled.current_prefetch_idx;
+                i++) {
+            const auto ptr = EVEX_compress_addr(
+                    base, prf_sprinkled.prefetch_offsets[i]);
+            uni_prefetch(ptr, brgemm_prf1, false);
+        }
+
+        // Update idx of last prefetched line
+        prf_sprinkled.current_prefetch_idx += num_prefetches_to_jit;
+    };
+
+    if (brg.prfA.sprinkled) jit_prefetches(prf_sprinkled_a, reg_A);
+    if (brg.prfB.sprinkled) jit_prefetches(prf_sprinkled_b, reg_B);
+
+    current_num_amx_ops++;
+}
 void jit_brgemm_amx_uker_base_t::maybe_tileloadd_nt(
         brgemm_iteration_t &bi, matrix_kind_t mk, int xdb, size_t offset) {
 
@@ -2429,19 +2548,33 @@ void jit_brgemm_amx_uker_base_t::fill_imap() {
         tloop.ldis.reserve(brg.ldb2);
         tloop.rdis.reserve(brg.rdb);
         tloop.bsis.reserve(brg.brgattr.max_bs);
+        brgemm_iteration_t bi_prefetch;
 
         auto bdi_pos = skipped_bd_mask(0);
         bd_iteration_t bdi;
         bdi.blocks.reserve(brg.bd_block2);
+        int prefetch_distance_m = brg.bcast_dim;
+        bd_iteration_t bdi_prefetch;
+        bi_prefetch.bdi = &bdi_prefetch;
+
         for (int bdb = 0; bdb < brg.bdb; bdb += brg.bd_block2) {
             bdi.blocks.clear();
             for (int ibdb = 0; ibdb < brg.bd_block2; ibdb++) {
                 auto abdb = bdb + ibdb;
                 if (abdb >= brg.bdb) break;
-                if (brg.bdb_tail && abdb == brg.bdb - 1)
+                if (brg.bdb_tail && abdb == brg.bdb - 1) {
                     bdi.blocks.emplace_back(bdi_pos, brg.bdb_tail, true);
-                else
+                    if (brg.prfA.sprinkled)
+                        bdi_prefetch.blocks.emplace_back(
+                                bdi_pos + prefetch_distance_m, brg.bdb_tail,
+                                true);
+                } else {
                     bdi.blocks.emplace_back(bdi_pos, brg.bd_block, false);
+                    if (brg.prfA.sprinkled)
+                        bdi_prefetch.blocks.emplace_back(
+                                bdi_pos + prefetch_distance_m, brg.bd_block,
+                                false);
+                }
                 bdi_pos += brg.bd_block;
                 if (bdi_pos >= brg.bcast_dim) break;
                 bdi_pos = skipped_bd_mask(bdi_pos);
@@ -2476,15 +2609,29 @@ void jit_brgemm_amx_uker_base_t::fill_imap() {
         size_t ldi_pos = 0;
         dim_iteration_t ldi;
         ldi.blocks.reserve(brg.ld_block2);
+        size_t prefetch_distance_n = (size_t)brg.ldb;
+        bd_iteration_t ldi_prefetch;
+        bi_prefetch.ldi = &ldi_prefetch;
+
         for (int ldb = 0; ldb < brg.ldb; ldb += brg.ld_block2) {
             ldi.blocks.clear();
             for (int ildb = 0; ildb < brg.ld_block2; ildb++) {
                 auto aldb = ldb + ildb;
                 if (aldb >= brg.ldb) break;
-                if (brg.ldb_tail && aldb == brg.ldb - 1)
+                if (brg.ldb_tail && aldb == brg.ldb - 1) {
                     ldi.blocks.emplace_back(ldi_pos, brg.ldb_tail, true);
-                else
+                    if (brg.prfB.sprinkled)
+                        ldi_prefetch.blocks.emplace_back(
+                                ldi_pos + prefetch_distance_n, brg.ldb_tail,
+                                true);
+
+                } else {
                     ldi.blocks.emplace_back(ldi_pos, brg.ld_block, false);
+                    if (brg.prfB.sprinkled)
+                        ldi_prefetch.blocks.emplace_back(
+                                ldi_pos + prefetch_distance_n, brg.ld_block,
+                                false);
+                }
                 ldi_pos++;
             }
             ldi.idx = tloop.ldis.size();
@@ -2494,9 +2641,15 @@ void jit_brgemm_amx_uker_base_t::fill_imap() {
         size_t rdi_pos = 0;
         dim_iteration_t rdi;
         rdi.blocks.reserve(1);
+        dim_iteration_t rdi_prefetch;
+        bi_prefetch.rdi = &rdi_prefetch;
+
         for (int rdb = 0; rdb < brg.rdb; rdb++) {
             rdi.blocks.clear();
             rdi.blocks.emplace_back(rdi_pos, brg.rd_block);
+            if (brg.prfA.sprinkled || brg.prfB.sprinkled) {
+                rdi_prefetch.blocks.emplace_back(rdi_pos, brg.rd_block);
+            }
             rdi.idx = tloop.rdis.size();
             tloop.rdis.push_back(rdi);
             rdi_pos++;
@@ -2504,10 +2657,16 @@ void jit_brgemm_amx_uker_base_t::fill_imap() {
         if (brg.rdb_tail > 0) {
             rdi.blocks.clear();
             rdi.blocks.emplace_back(rdi_pos, brg.rdb_tail, true);
+            if (brg.prfA.sprinkled || brg.prfB.sprinkled) {
+                rdi_prefetch.blocks.emplace_back(rdi_pos, brg.rdb_tail, true);
+            }
             rdi.idx = tloop.rdis.size();
             tloop.rdis.push_back(rdi);
         }
 
+        // The case where bs_max is > 1, and prefetches are enabled
+        // is not supported. In order to support prefetches in this case,
+        // current_num_amx_ops needs to be an array per bs in bs_max.
         bs_iteration_t bsi;
         for (int bs = 0; bs < brg.brgattr.max_bs; bs++) {
             bsi.pos = bs;
@@ -2522,6 +2681,40 @@ void jit_brgemm_amx_uker_base_t::fill_imap() {
                 tloop.bdis[ibdi].similar
                         = find_similar(&(tloop.bdis[ibdi]), apply_postops);
             }
+        }
+
+        num_amx_ops = brg.bdb * brg.rdb * brg.ldb;
+        current_num_amx_ops = 0;
+        // Calculate the offsets of A's cache lines to prefetch
+        prf_sprinkled_a.reset();
+        if (brg.prfA.sprinkled) {
+            for (size_t bdb = 0; bdb < bdi_prefetch.blocks.size(); ++bdb) {
+                for (size_t rdb = 0; rdb < rdi_prefetch.blocks.size(); ++rdb) {
+                    int bd_block_size = bdi_prefetch.blocks[bdb].block;
+                    for (int bd = 0; bd < bd_block_size; bd++) {
+                        prf_sprinkled_a.prefetch_offsets.push_back(
+                                A_offset_line(bi_prefetch, bdb, rdb, bd));
+                    }
+                }
+            }
+            std::sort(prf_sprinkled_a.prefetch_offsets.begin(),
+                    prf_sprinkled_a.prefetch_offsets.end());
+        }
+
+        // Calculate the offsets of B's cache lines to prefetch
+        prf_sprinkled_b.reset();
+        if (brg.prfB.sprinkled) {
+            for (size_t ldb = 0; ldb < ldi_prefetch.blocks.size(); ++ldb) {
+                for (size_t rdb = 0; rdb < rdi_prefetch.blocks.size(); ++rdb) {
+                    int rd_block_size = rdi_prefetch.blocks[rdb].block;
+                    for (int rd = 0; rd < rd_block_size; rd += brg.rd_step) {
+                        prf_sprinkled_b.prefetch_offsets.push_back(
+                                B_offset_line(bi_prefetch, ldb, rdb, rd));
+                    }
+                }
+            }
+            std::sort(prf_sprinkled_b.prefetch_offsets.begin(),
+                    prf_sprinkled_b.prefetch_offsets.end());
         }
     }
 }
@@ -2663,7 +2856,10 @@ void jit_brgemm_amx_uker_base_t::generate() {
     ld_block_C_size_ = brg.typesize_C * brg.ld_block;
     ld_block_D_size_ = brg.typesize_D * brg.ld_block;
     ld_block_bias_size_ = brg.typesize_bias * brg.ld_block;
-    ld_block_scales_size_ = sizeof(float) * brg.ld_block;
+    if (brg.with_wei_scales) {
+        ld_block_scales_size_
+                = types::data_type_size(brg.dt_wei_scales) * brg.ld_block;
+    }
     ld_block_zp_size_ = sizeof(int32_t) * brg.ld_block;
     ldb_tail_B_size_ = brg.typesize_B * brg.ldb_tail;
     ldb_tail_C_size_ = brg.typesize_C * brg.ldb_tail;

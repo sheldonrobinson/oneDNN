@@ -89,6 +89,7 @@ struct brgemm_matmul_conf_t {
     dim_t M_blk, N_blk, K_blk, M_tail, N_tail, K_tail;
     int M_chunk_size, N_chunk_size, K_chunk_size;
     bool is_a_nt, is_b_nt, set_nt;
+    bool need_prefetch_a, need_prefetch_b;
     dim_t LDA, LDB, LDC, LDD;
     dim_t LDB2;
     int brgemm_batch_size, brgemm_batch_tail_size;
@@ -106,11 +107,11 @@ struct brgemm_matmul_conf_t {
     bool with_sum;
     bool with_eltwise;
     bool with_binary;
-    bool with_scales;
+    bool with_src_scales;
+    bool with_wei_scales;
     bool with_dst_scales;
     bool s8s8_compensation_required;
     bool packed_sparse_weights;
-    bool req_transpose_scales;
     bool with_wei_decompression;
     int postops_inst_count;
     brgemm_broadcast_t src_zp_type;
@@ -176,6 +177,7 @@ struct brgemm_matmul_conf_t {
     dim_t buffer_a_m_stride;
     dim_t buffer_a_per_thread_sz;
 
+    dim_t buffer_b_k_stride;
     dim_t buffer_b_gb_stride;
     dim_t buffer_b_k_brg_stride;
     dim_t buffer_b_per_thread_sz;
@@ -225,9 +227,20 @@ struct brgemm_matmul_conf_t {
     bool is_src_batch_layout_trivial = false;
     bool is_wei_batch_layout_trivial = false;
     bool is_dst_batch_layout_trivial = false;
-    bool is_oscale_per_n = false;
-    bool is_oscale_per_k = false;
+    bool is_wei_scale_per_n = false;
+    bool is_wei_scale_per_k = false;
+    bool req_transpose_scales = false;
     bool apply_scales_in_buffer_b = false;
+    // For generic cases, when groups are selected the way they can't divide a
+    // K_blk in equal pieces, it gets really hard to call a kernel with a
+    // single "per_N line" of scales. In this case weights will be copied
+    // to a larger memory buffer and used like a full tensor.
+    // TODO: convert to a method. State must be set in a specific place of the
+    // initialization as relies on blocking.
+    bool gK_and_K_blk_are_divisible = false;
+    size_t wei_scales_dt_sz = 0;
+    dim_t wei_scales_k_group_size = 0;
+    data_type_t wei_scales_dt = data_type::undef;
     bool extendable_k = false;
 
     inline bool lda_big_pow2() const {

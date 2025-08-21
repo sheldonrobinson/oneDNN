@@ -43,7 +43,7 @@ public:
     expr_t create_mask(const layout_t &reg_layout, const tile_t &tile,
             const coord_t &coord) const {
         gpu_assert(!is_empty());
-        auto layout = reg_layout.map(tile, coord);
+        auto layout = reg_layout.sub(tile, coord);
         auto view = mem_view_.create_sub_view(tile, coord);
         mask_tensor_t mask_tensor(layout);
         icoord_t args(layout.ndims());
@@ -159,9 +159,9 @@ public:
         if (!reg_layout_.is_empty()) {
             if (needs_reduction()) {
                 tile_coord_t reduce_tile(_tile_coord.tile, tile_coord.coord);
-                ret.reg_layout_ = ret.reg_layout_.map(reduce_tile);
+                ret.reg_layout_ = ret.reg_layout_.sub(reduce_tile);
             } else {
-                ret.reg_layout_ = ret.reg_layout_.map(tile_coord);
+                ret.reg_layout_ = ret.reg_layout_.sub(tile_coord);
             }
         }
         ret.allocs_.clear();
@@ -534,11 +534,11 @@ public:
             }
         }
 
-        int inner_dim_idx = -1;
-        auto base_inner_tile = find_1d_tile(
-                lhs_tensor.reg_layout().type(), args, inner_dim_idx);
-        auto inner_layout = lhs_tensor.reg_layout().map(base_inner_tile);
-        gpu_assert(inner_dim_idx != -1);
+        pvar_t inner_dim;
+        auto base_inner_tile
+                = find_1d_tile(lhs_tensor.reg_layout().type(), args, inner_dim);
+        auto inner_layout = lhs_tensor.reg_layout().sub(base_inner_tile);
+        gpu_assert(!inner_dim.is_undef());
 
         // All post-ops arguments are f32 type except f64 bias and u64
         // stochastic rounding seed.
@@ -554,16 +554,16 @@ public:
         lhs_tensor.reg_layout().for_each_tile(
                 base_inner_tile, [&](const icoord_t &lhs_start) {
                     tile_coord_t inner_tile_coord(base_inner_tile, lhs_start);
-                    auto rhs_value = compute_post_op_expr(post_op_.rhs(),
-                            inner_tile_coord, inner_dim_idx, args);
+                    auto rhs_value = compute_post_op_expr(
+                            post_op_.rhs(), inner_tile_coord, inner_dim, args);
                     auto &t = *args.at(post_op_.lhs());
                     expr_t store_mask;
                     if (lhs_tensor.needs_masked_update()) {
                         store_mask = zero_pad_builder.create_mask(inner_layout,
                                 inner_tile_coord.tile, inner_tile_coord.coord);
                     }
-                    auto inner_stmt = t.store_stmt(inner_tile_coord,
-                            inner_dim_idx, rhs_value, store_mask);
+                    auto inner_stmt = t.store_stmt(
+                            inner_tile_coord, inner_dim, rhs_value, store_mask);
                     stmt = stmt.append(inner_stmt);
                 });
 
@@ -575,7 +575,7 @@ private:
     // post-op.
     tile_t find_1d_tile(const type_t &lhs_type,
             const object_map_t<expr_t, post_op_tensor_t *> &args,
-            int &inner_dim_idx) const {
+            pvar_t &inner_dim) const {
         auto &lhs_tensor = *args.at(post_op_.lhs());
 
         gpu_assert(!lhs_tensor.reg_layout().is_empty());
@@ -584,11 +584,11 @@ private:
         if (lhs_tensor.reg_layout().blocks().empty()) {
             for (dim_t d : lhs_tensor.mem_view().vdims().values())
                 gpu_assert(d == 1);
-            inner_dim_idx = 0;
+            inner_dim = 0;
         } else {
             auto &b0 = lhs_tensor.reg_layout().blocks()[0];
             gpu_assert(dim_t(b0.stride) == 1);
-            inner_dim_idx = b0.dim_idx;
+            inner_dim = b0.dim;
 
             dim_t inner_block = b0.block;
             dim_t max_step = 2 * hw_.grf_size() / lhs_type.size();
@@ -596,17 +596,17 @@ private:
 
             for (auto &kv : args) {
                 auto &t = *kv.second;
-                if (t.is_broadcast_dim(b0.dim_idx)) continue;
+                if (t.is_broadcast_dim(b0.dim)) continue;
 
                 auto &l = t.reg_layout();
                 gpu_assert(!l.is_empty());
                 gpu_assert(!l.blocks().empty());
                 auto &lb0 = l.blocks()[0];
-                gpu_assert(lb0.dim_idx == b0.dim_idx);
+                gpu_assert(lb0.dim == b0.dim);
                 gpu_assert(dim_t(lb0.stride) == 1);
                 inner_block = math::gcd(lb0.block, inner_block);
             }
-            dims[b0.dim_idx] = inner_block;
+            dims[b0.dim] = inner_block;
         }
         return tile_t(dims);
     }
@@ -839,7 +839,7 @@ private:
             base_tile = c_mem_view_.split_into_max_tile(
                     tmp_buf_elems, /*is_dense=*/false);
             try {
-                c_reg_layout.map(base_tile);
+                c_reg_layout.sub(base_tile);
                 break;
             } catch (std::runtime_error &) {
                 tmp_buf_elems /= 2;
@@ -890,7 +890,7 @@ private:
         // Iterate by tiles and apply post-ops.
         c_mem_view_.for_each_tile(base_tile, [&](const icoord_t &start) {
             tile_coord_t tile_coord(base_tile, start);
-            auto c_tile_layout = c_reg_layout.map(tile_coord);
+            auto c_tile_layout = c_reg_layout.sub(tile_coord);
             build_tile(tile_coord, c_tile_layout, c_reg_buf);
         });
 

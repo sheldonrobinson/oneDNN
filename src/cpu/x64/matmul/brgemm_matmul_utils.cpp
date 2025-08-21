@@ -283,7 +283,7 @@ brgemm_matmul_conf_utils_t::brgemm_matmul_conf_utils_t(
     , bf8_dt(everyone_is(f8_e5m2, bgmmc.src_dt, bgmmc.wei_dt)
               && one_of(bgmmc.dst_dt, f16, f32, bf16, f8_e5m2, f8_e4m3))
     , int8_dt(utils::one_of(bgmmc.src_dt, u8, s8) && bgmmc.wei_dt == s8
-              && one_of(bgmmc.dst_dt, u8, s8, s32, f32, bf16))
+              && one_of(bgmmc.dst_dt, u8, s8, s32, f32, f16, bf16))
     , bf32_dt(f32_dt
               && one_of(attr.fpmath_.mode_, fpmath_mode::bf16, fpmath_mode::any)
               && isa == avx512_core_amx)
@@ -1271,20 +1271,23 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
 
     const auto &src_scales = attr.scales_.get(DNNL_ARG_SRC);
     const auto &wei_scales = attr.scales_.get(DNNL_ARG_WEIGHTS);
-    const bool has_wei_scales = !wei_scales.has_default_values();
-    bgmmc.with_scales = !src_scales.has_default_values() || has_wei_scales;
-    if (has_wei_scales) {
+    bgmmc.with_src_scales = !src_scales.has_default_values();
+    bgmmc.with_wei_scales = !wei_scales.has_default_values();
+    if (bgmmc.with_wei_scales) {
         const auto wei_qmask_N = 1 << (bgmmc.ndims - 1);
         const auto wei_qmask_K = 1 << (bgmmc.ndims - 2);
-        bgmmc.is_oscale_per_k = wei_scales.get_mask() & wei_qmask_K;
-        bgmmc.is_oscale_per_n = wei_scales.get_mask() & wei_qmask_N;
-        bgmmc.apply_scales_in_buffer_b = bgmmc.is_oscale_per_k
+        bgmmc.is_wei_scale_per_k = wei_scales.get_mask() & wei_qmask_K;
+        bgmmc.is_wei_scale_per_n = wei_scales.get_mask() & wei_qmask_N;
+        bgmmc.apply_scales_in_buffer_b = bgmmc.is_wei_scale_per_k
                 && bgmmc.with_wei_decompression && bgmmc.N * bgmmc.K != 1;
+        bgmmc.wei_scales_dt = wei_scales.get_data_type();
+        bgmmc.wei_scales_dt_sz = types::data_type_size(bgmmc.wei_scales_dt);
+        bgmmc.wei_scales_k_group_size = wei_scales.get_group(0);
 
         // only common and per-oc-channel scales are supported
         // only per-ic-channel scales is supprted with weight decompression
-        VCONDCHECK_BG(wei_scales.get_mask() == 0 || bgmmc.is_oscale_per_n
-                        || IMPLICATION(bgmmc.is_oscale_per_k,
+        VCONDCHECK_BG(wei_scales.get_mask() == 0 || bgmmc.is_wei_scale_per_n
+                        || IMPLICATION(bgmmc.is_wei_scale_per_k,
                                 bgmmc.with_wei_decompression),
                 VERBOSE_UNSUPPORTED_SCALES_CFG);
     }
@@ -1379,7 +1382,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
             || bgmmc.wei_tag == adbc;
     bgmmc.use_buffer_b = bm_conf_utils.use_buffer_b();
     bgmmc.req_transpose_scales = bgmmc.apply_scales_in_buffer_b
-            && bgmmc.is_oscale_per_k && bgmmc.is_oscale_per_n
+            && bgmmc.is_wei_scale_per_k && bgmmc.is_wei_scale_per_n
             && bgmmc.transposed_B;
 
     if ((bm_conf_utils.is_f32_f16() || bm_conf_utils.is_f32_bf16())
@@ -1555,6 +1558,14 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
                 = bm_conf_utils.wei_down_convert_to_vnni();
     }
 
+    // This setting must be updated post blocking as it has a dependency on
+    // `bgmmc.K_blk`. See `gK_and_K_blk_are_divisible` comment.
+    if (bgmmc.is_wei_scale_per_k) {
+        const auto gK = bgmmc.wei_scales_k_group_size;
+        bgmmc.gK_and_K_blk_are_divisible = gK > 1
+                && ((bgmmc.K_blk % gK == 0) || (gK % bgmmc.K_blk == 0));
+    }
+
     VCHECK_BG(bm_conf_utils.set_B_flags(weights_md), VERBOSE_BLOCKING_FAIL, "");
 
     bgmmc.M_tail = bgmmc.is_runtime_M ? 0 : bgmmc.M % bgmmc.M_blk;
@@ -1665,6 +1676,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     is_small_shapes = is_small_shapes && !bgmmc.packed_sparse_weights;
     VCONDCHECK_BG(!is_small_shapes, VERBOSE_SMALL_SHAPES);
 
+    bgmmc.LDB2 = rnd_up(bgmmc.K, bgmmc.wei_k_blk) * bgmmc.LDB;
     return status::success;
 }
 
@@ -1794,7 +1806,10 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
                 * (bgmmc.nthr_k > 1 ? bgmmc.M : bgmmc.M_blk);
     }
 
-    if (bgmmc.nthr_k > 1) {
+    if (!bgmmc.use_buffer_c) {
+        // No need for C buffer
+        bgmmc.buffer_c_per_thread_sz = 0;
+    } else if (bgmmc.nthr_k > 1) {
         // c size == M * N (for reduction)
         bgmmc.buffer_c_per_thread_sz = bgmmc.buffer_c_chunk_sz;
 
@@ -1819,10 +1834,29 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
 
     bgmmc.buffer_a_per_thread_sz = bgmmc.buffer_a_m_stride * bgmmc.M_chunk_size;
 
-    bgmmc.buffer_b_gb_stride
-            = bgmmc.tr_b_dt_sz * bgmmc.LDB * bgmmc.K_blk * bgmmc.wei_k_blk;
+    // Layout of a single GB in packed format:
+    //     [n = n_blk / LDB][k = k_blk / wei_k_blk][k = wei_k_blk / vnni][n = LDB][k = vnni]
+
+    // For n = 0 and K aligned to vnni granularity, the starting position is:
+    //     [K / vnni][n = 0][k_vnni = 0]
+    // Each copy kernel processes wei_scales_gK * n elements.
+    // The kernel accounts for LDB2 and writes data in a strided manner.
+
+    // The following value is multiplied by K to compute the starting offset:
+    bgmmc.buffer_b_k_stride = bgmmc.tr_b_dt_sz * bgmmc.LDB;
+
+    // The total usable data in one GB is:
+    //     n_blk * k_blk, though both values require rounding.
+    bgmmc.buffer_b_gb_stride = bgmmc.tr_b_dt_sz * rnd_up(bgmmc.N_blk, bgmmc.LDB)
+            * rnd_up(bgmmc.K_blk, bgmmc.wei_k_blk);
+
+    // Each BRGEMM operation consumes k_blk * n_blk * brgemm_batch_size elements from B.
     bgmmc.buffer_b_k_brg_stride
             = bgmmc.buffer_b_gb_stride * bgmmc.brgemm_batch_size;
+
+    // A full K chunk of B is stored in a temporary buffer for reuse.
+    // Often, the size k_blk * n_blk * brgemm_batch_size * K_chunk_size ≈ L2 cache size,
+    // enabling reuse across the M dimension.
     bgmmc.buffer_b_per_thread_sz
             = bgmmc.buffer_b_k_brg_stride * bgmmc.K_chunk_size;
 
@@ -1921,7 +1955,8 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
     bgmmc.has_zero_point_b = bgmmc.wei_zp_type != brgemm_broadcast_t::none;
     bgmmc.has_zero_point_c = bgmmc.dst_zp_type != brgemm_broadcast_t::none;
     bgmmc.post_ops_applicable = one_of(true, bgmmc.with_sum, bgmmc.with_bias,
-            bgmmc.with_scales && !bgmmc.apply_scales_in_buffer_b,
+            (bgmmc.with_src_scales || bgmmc.with_wei_scales)
+                    && !bgmmc.apply_scales_in_buffer_b,
             bgmmc.with_eltwise, bgmmc.with_binary, bgmmc.acc_dt != bgmmc.dst_dt,
             bgmmc.s8s8_compensation_required, bgmmc.has_zero_point_a,
             bgmmc.has_zero_point_b && !bgmmc.with_wei_decompression,
@@ -1996,6 +2031,12 @@ void init_scratchpad(memory_tracking::registrar_t &scratchpad,
         scratchpad.book(key_brgemm_primitive_buffer_d,
                 bgmmc.M_blk * bgmmc.N_blk * bgmmc.c_dt_sz * bgmmc.nthr,
                 default_data_align);
+    if (bgmmc.with_dst_scales) {
+        // See brgemm_types.hpp comment for `with_dst_scales`.
+        scratchpad.book(key_matmul_dst_scales,
+                static_cast<size_t>(bgmmc.nthr) * sizeof(float),
+                default_data_align);
+    }
 }
 
 } // namespace matmul

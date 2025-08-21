@@ -22,7 +22,6 @@
 #include <map>
 #include <vector>
 
-#include "common/optional.hpp"
 #include "gpu/intel/jit/ir/core.hpp"
 #include "gpu/intel/jit/ir/hw.hpp"
 
@@ -55,15 +54,22 @@ public:
     }
 
     std::string create_tmp_name(const std::string &prefix = "tmp") {
-        int &id = prefix_ids_[prefix];
-        auto name = prefix + "_" + std::to_string(id);
-        id++;
+        auto name = prefix;
+        if (all_names_.count(prefix) != 0) {
+            int &id = prefix_ids_[prefix];
+            do {
+                id++;
+                name = prefix + "_" + std::to_string(id);
+            } while (all_names_.count(name) != 0);
+        }
+        all_names_.insert(name);
         return name;
     }
 
 private:
     exec_config_t exec_cfg_;
     constraint_set_t &cset_;
+    std::unordered_set<std::string> all_names_;
     std::unordered_map<std::string, int> prefix_ids_;
 };
 
@@ -597,8 +603,7 @@ std::vector<stmt_t> find_stmt_groups(
 
 // Returns a statement group matching the label. `root` must have exactly one
 // occurrence.
-utils::optional_t<stmt_t> find_stmt_group(
-        const object_t &root, const stmt_label_t &label);
+stmt_t find_stmt_group(const object_t &root, const stmt_label_t &label);
 
 // Removes all statement groups matching the label.
 object_t remove_stmt_group(const object_t &root, stmt_label_t label);

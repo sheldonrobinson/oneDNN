@@ -39,6 +39,11 @@ class ir_printer_t : public ir_visitor_t {
 public:
     ir_printer_t(std::ostream &out) : out_(out) {}
 
+    void _visit(const assign_t &obj) override {
+        print_indent();
+        out_ << obj.str() << "\n";
+    }
+
     void _visit(const alloc_t &obj) override {
         auto grf_size = 1; // Assume all objects are grf aligned
         auto guard = mem_usage_guard(obj.register_alloc_size(grf_size));
@@ -825,13 +830,12 @@ std::vector<stmt_t> find_stmt_groups(
     return ret;
 }
 
-utils::optional_t<stmt_t> find_stmt_group(
-        const object_t &root, const stmt_label_t &label) {
+stmt_t find_stmt_group(const object_t &root, const stmt_label_t &label) {
     auto groups = find_stmt_groups(root, label);
     if (groups.size() == 1)
         return groups[0];
     else
-        return utils::nullopt;
+        return {};
 }
 
 class stmt_group_remover_t : public ir_mutator_t {

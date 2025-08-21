@@ -17,19 +17,11 @@
 #ifndef GPU_INTEL_JIT_DSL_DSL_HPP
 #define GPU_INTEL_JIT_DSL_DSL_HPP
 
-#include <stack>
-
-#include "gpu/intel/jit/ir/blocking.hpp"
-#include "gpu/intel/jit/ir/fma.hpp"
+#include "gpu/intel/jit/dsl/decl.hpp"
 #include "gpu/intel/jit/ir/ir.hpp"
-#include "gpu/intel/jit/ir/ir_builder.hpp"
 #include "gpu/intel/jit/ir/kernel_info.hpp"
 #include "gpu/intel/jit/ir/message.hpp"
 #include "gpu/intel/jit/ir/message_patterns.hpp"
-#include "gpu/intel/jit/pass/pass.hpp"
-#include "gpu/intel/jit/v2/ir/bridge.hpp"
-#include "gpu/intel/jit/v2/ir/tensor.hpp"
-#include "ngen_core.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -42,167 +34,117 @@ int grf_size();
 int min_align_2d();
 int min_pitch_2d();
 
-struct transform_t {
-    // Sample transforms on bf16 data with pack_size 16:
-    // none:           64a64b -> 64a64b
-    // block:          64a64b -> 4b64a16b
-    // vnni:           64a64b -> 4b32a16b2a
-    // transpose_vnni: 64a64b -> 4a32b16a2b
-    enum class kind_t { none, block, vnni, transpose_vnni };
+using tile_t = dnnl::impl::gpu::intel::jit::tile_t;
+using coord_t = dnnl::impl::gpu::intel::jit::coord_t;
+using layout_t = dnnl::impl::gpu::intel::jit::layout_t;
+using expr_t = dnnl::impl::gpu::intel::jit::expr_t;
 
-    transform_t() = default;
-
-    transform_t(kind_t t_kind, int pack_size, ngen::CacheSettingsLSC cache_hint,
-            std::array<pvar_t, 2> dims)
-        : kind(t_kind)
-        , pack_size(pack_size)
-        , cache_hint(to_ir(cache_hint))
-        , dims(std::move(dims)) {}
-
-    v2::layout_t get_layout(const tile_t &sizes, type_t type,
-            const v2::layout_desc_t &desc) const {
-
-        auto col_var = dims[0];
-        auto col = sizes[dims[0]];
-        auto row_var = dims[1];
-        auto row = sizes[dims[1]];
-        auto t = type.size();
-
-        auto normalized = kind;
-        if (normalized == kind_t::transpose_vnni) {
-            std::swap(col_var, row_var);
-            std::swap(col, row);
-            normalized = kind_t::vnni;
-        }
-
-        if (normalized == kind_t::vnni && t >= 4) normalized = kind_t::block;
-
-        int col_inner = pack_size ? pack_size : grf_size();
-        if (normalized == kind_t::block && col <= col_inner)
-            normalized = kind_t::none;
-
-        switch (normalized) {
-            case kind_t::none:
-                return v2::layout_t(desc, type, 0,
-                        {{col_var, col, 1}, {row_var, row, col}});
-
-            case kind_t::block: {
-                int col_outer = (int)(col / col_inner);
-                return v2::layout_t(desc, type, 0,
-                        {{col_var, col_inner, 1}, {row_var, row, col_inner},
-                                {col_var, col_outer, row * col_inner}});
-            }
-
-            case kind_t::vnni: {
-                int row_inner = 4 / t;
-                int row_outer = (int)(row / row_inner);
-                int col_outer = (int)(col / col_inner);
-                return v2::layout_t(desc, type, 0,
-                        {{row_var, row_inner, 1},
-                                {col_var, col_inner, row_inner},
-                                {row_var, row_outer, col_inner * row_inner},
-                                {col_var, col_outer,
-                                        row_outer * col_inner * row_inner}});
-            }
-
-            // Impossible to hit due to normalization
-            case kind_t::transpose_vnni:
-            default: gpu_assert(false); return {};
-        }
-    }
-
-    // Tile used for 2d messages
-    tile_t get_2d_tile(type_t type) const {
-        if (kind == kind_t::transpose_vnni) {
-            auto width = pack_size ? pack_size
-                                   : grf_size() / std::max(type.size(), 4);
-            auto height = 32;
-            return {{dims[1], width}, {dims[0], height}};
-        }
-
-        auto width = pack_size ? pack_size : grf_size() / type.size();
-        auto height = 32;
-        return {{dims[0], width}, {dims[1], height}};
-    }
-
-    // Tile used for block loads
-    tile_t get_block_tile(type_t type) const {
-        if (kind == kind_t::none) {
-            return {{dims[0], 8 * grf_size() / type.size()}, {dims[1], 1}};
-        } else if (kind == kind_t::block) {
-            return {{dims[0], pack_size ? pack_size : grf_size() / type.size()},
-                    {dims[1], 1}};
-        } else {
-            gpu_assert(false);
-            return {};
-        }
-    }
-
-    static send_cache_hint_t to_ir(ngen::CacheSettingsLSC hint) {
-        switch (hint) {
-            case ngen::CacheSettingsLSC::L1C_L3C:
-                return send_cache_hint_t::load_once;
-            case ngen::CacheSettingsLSC::Default:
-                return send_cache_hint_t::hw_default;
-            default: gpu_assert(false); return send_cache_hint_t::undef;
-        }
-    }
-
-    kind_t kind = kind_t::none;
-    int pack_size = 0;
-    send_cache_hint_t cache_hint = send_cache_hint_t::undef;
-    std::array<pvar_t, 2> dims = {};
+struct send_hint_t {
+    send_cache_hint_t cache;
 };
 
 struct tensor_t {
+    tensor_t() = default;
+    tensor_t(const expr_t &buf, const layout_t &layout)
+        : buf(buf), layout(layout) {}
+    const type_t &type() const { return layout.type(); }
+    tensor_t sub(const icoord_t &coord, const tile_t &tile) const {
+        // coord is not measured relative to tile size
+        for (auto &var : coord)
+            gpu_assert(coord[var] % tile[var] == 0);
+        return {buf[layout.offset_in_bytes(coord)], layout.sub(tile)};
+    }
+
     std::string str() const {
         std::ostringstream oss;
-        oss << "buffer:    " << buf.str();
+        oss << "buffer:    " << buf.str() << "\n";
         oss << "layout: " << layout.str();
         return oss.str();
     }
+
     IR_DEFINE_DUMP()
+
     expr_t buf;
-    v2::layout_t layout;
+    layout_t layout;
 };
 
 struct global_tensor_t {
     expr_t buf;
     type_t type;
     expr_t base_offset;
-    pvar_map_t<expr_t> idxs;
-    pvar_map_t<expr_t> strides;
+    coord_t coord;
     pvar_map_t<expr_t> sizes;
+    pvar_map_t<expr_t> strides;
     tile_t tile;
 
-    expr_t offset(const icoord_t &coord) const {
+    global_tensor_t() = default;
+    global_tensor_t(const expr_t &buf, const pvar_map_t<expr_t> &sizes,
+            const pvar_map_t<expr_t> &strides)
+        : buf(buf)
+        , type(buf.type().remove_ptr())
+        , sizes(sizes)
+        , strides(strides) {}
+    global_tensor_t(const expr_t &buf, const type_t &type,
+            const expr_t &base_offset, const coord_t &coord,
+            const pvar_map_t<expr_t> &sizes, const pvar_map_t<expr_t> &strides,
+            const tile_t &tile)
+        : buf(buf)
+        , type(type)
+        , base_offset(base_offset)
+        , coord(coord)
+        , sizes(sizes)
+        , strides(strides)
+        , tile(tile) {}
+
+    expr_t offset(const icoord_t &sub_coord) const {
         expr_t ret = base_offset;
-        for (auto &c : coord) {
-            ret += (idxs[c] + coord[c]) * strides[c];
+        for (auto &c : sub_coord) {
+            ret += (coord[c] + sub_coord[c]) * strides[c];
         }
         return simplify(ret * type.size());
+    }
+
+    global_tensor_t map(const tile_t &tile, const coord_t &coord) const {
+        global_tensor_t ret = *this;
+        ret.coord = coord;
+        ret.tile = tile;
+        return ret;
     }
 
     std::string str() const {
         std::ostringstream oss;
         oss << "(" << buf << "+" << base_offset << ")." << type << " : ";
-        for (auto &k : idxs) {
-            oss << " " << k << " - (idx: " << idxs[k]
-                << ", stride: " << strides[k] << ", size: " << sizes[k]
-                << ", tile: " << tile[k] << ")";
+        for (auto &k : coord) {
+            oss << " " << k << " - (coord: " << coord[k]
+                << ", stride: " << strides[k] << ", size: " << sizes[k];
+            if (!tile.is_empty()) oss << ", tile: " << tile[k];
+            oss << ")";
         }
         return oss.str();
     }
 };
 
-void declare_kernel(const kernel_iface_t &interface, ir_context_t &ctx);
-stmt_t end_kernel();
+struct kernel_t {
+    kernel_t() : iface("invalid_dsl_kernel") {}
+    kernel_t(kernel_iface_t iface, stmt_t body, const exec_config_t &exec_cfg)
+        : iface(std::move(iface)), body(std::move(body)), exec_cfg(exec_cfg) {}
+
+    kernel_iface_t iface;
+    stmt_t body;
+    exec_config_t exec_cfg;
+    ngen::DebugConfig debug_cfg;
+};
+
+void declare_kernel(const kernel_iface_t &interface, ir_context_t &ctx,
+        bool new_ir_api = false);
+kernel_t end_kernel();
 
 void begin_scope();
 void end_scope();
 stmt_t pop_scope(); // Ends current scope and removes it from the kernel
+void append(stmt_t stmt); // Adds statement to the current scope
 
-void assume(expr_t e);
+void assume(const expr_t &e);
 
 const std::array<expr_t, 3> &group_ids();
 const expr_t &group_id(int idx);
@@ -212,10 +154,11 @@ const std::array<expr_t, 3> &local_sizes();
 const expr_t &local_size(int idx);
 
 class lval_t {
-
 public:
+    lval_t() = default;
+    lval_t(const type_t &type, const std::string &name)
+        : var(var_t::make(type, name)) {}
     lval_t(const expr_t &v) : var(v) {}
-
     lval_t &operator=(const expr_t &obj);
 
     lval_t sub(int off, int elems) const {
@@ -236,7 +179,9 @@ public:
     DEFINE_BINARY_ASSIGN_OPERATOR(*)
     DEFINE_BINARY_ASSIGN_OPERATOR(/)
     DEFINE_BINARY_ASSIGN_OPERATOR(%)
+    DEFINE_BINARY_ASSIGN_OPERATOR(|)
     DEFINE_BINARY_ASSIGN_OPERATOR(&)
+    DEFINE_BINARY_ASSIGN_OPERATOR(^)
 
 #undef DEFINE_BINARY_ASSIGN_OPERATOR
 
@@ -250,60 +195,101 @@ public:
     expr_t var;
 };
 
-expr_t arg(const std::string &name);
+expr_t subgroup_id(int idx = 0);
+expr_t arg(const std::string &name, bool allow_empty = false);
+// TODO: Unify def() API, keep three versions:
+// 1. def(name, type, value)
+// 2. def(name, type)
+// 3. def(name, value)
+// name goes first in all three for consistency.
 lval_t def(type_t type, const std::string &name, const expr_t &value = {},
         bool force_alloc = false);
+lval_t def(
+        const std::string &name, const type_t &type, const expr_t &value = {});
 lval_t def(const std::string &name, const expr_t &value);
-
-tensor_t def(const v2::layout_t &layout, const std::string &name,
+tensor_t def(const layout_t &layout, const std::string &name,
         const expr_t &value = {});
 expr_t let(type_t type, const std::string &name, const expr_t &value);
 expr_t let(const std::string &name, const expr_t &value);
+tensor_t def_slm(layout_t layout, const std::string &name);
 
-void prefetch(const global_tensor_t &g, const transform_t &transform,
-        const icoord_t &base);
+expr_t iif(
+        const expr_t &cond, const expr_t &true_expr, const expr_t &false_expr);
+expr_t extract(const expr_t &expr, int lane);
+
+void assign(const expr_t &var, const expr_t &value);
+
+void prefetch(const global_tensor_t &g, const icoord_t &base = {},
+        const send_hint_t &hint = {});
 void load(const tensor_t &t, const global_tensor_t &g,
-        const transform_t &transform, const icoord_t &base);
+        const icoord_t &base = {}, const send_hint_t &hint = {});
 void store(const global_tensor_t &g, const tensor_t &t,
-        const transform_t &transform, const icoord_t &base);
+        const icoord_t &base = {}, const send_hint_t &hint = {});
 
 void mma(const tensor_t &C, const tensor_t &A, const tensor_t &B,
         const tile_t &tile, const icoord_t &base, bool is_systolic);
 
-void assign(const expr_t &var, const expr_t &value);
-
 template <typename F>
-void if_(const expr_t &cond, F if_body) {
-    begin_scope();
-    if_body();
-    if_(cond, pop_scope());
+void _if(const expr_t &cond, F if_body) {
+    if (is_const(cond)) {
+        if (to_cpp<bool>(cond)) {
+            begin_scope();
+            if_body();
+            end_scope();
+        }
+    } else {
+        begin_scope();
+        if_body();
+        append(if_t::make(cond, pop_scope()));
+    }
 }
-template <>
-void if_(const expr_t &cond, const stmt_t &if_body);
 
 template <typename F, typename G>
-void if_(const expr_t &cond, const F &if_body, const G &else_body) {
-    begin_scope();
-    if_body();
-    auto if_body_stmt = pop_scope();
+void _if(const expr_t &cond, const F &if_body, const G &else_body) {
+    if (is_const(cond)) {
+        begin_scope();
+        if (to_cpp<bool>(cond)) {
+            if_body();
+        } else {
+            else_body();
+        }
+        end_scope();
+    } else {
+        begin_scope();
+        if_body();
+        auto if_body_stmt = pop_scope();
 
-    begin_scope();
-    else_body();
-    auto else_body_stmt = pop_scope();
-
-    if_(cond, if_body_stmt, else_body_stmt);
+        begin_scope();
+        else_body();
+        append(if_t::make(cond, if_body_stmt, pop_scope()));
+    }
 }
-template <>
-void if_(const expr_t &cond, const stmt_t &if_body, const stmt_t &else_body);
 
 template <typename F>
-void while_(const expr_t &cond, F body) {
+void _for(const expr_t &var, const expr_t &bound, const expr_t &step,
+        const F &body) {
     begin_scope();
     body();
-    while_(cond, pop_scope());
+    append(for_t::make(var, 0, bound, pop_scope(), step));
 }
-template <>
-void while_(const expr_t &cond, const stmt_t &body);
+
+template <typename F>
+void _for(const expr_t &var, const expr_t &bound, const F &body) {
+    _for(var, bound, 1, body);
+}
+
+template <typename F>
+void _while(const expr_t &cond, F body) {
+    if (is_const(cond) && !to_cpp<bool>(cond)) return;
+    begin_scope();
+    body();
+    append(while_t::make(cond, pop_scope()));
+}
+
+void binary(op_kind_t op, const tensor_t &dst, const tensor_t &src0,
+        const tensor_t &src1);
+
+void barrier();
 
 } // namespace dsl
 } // namespace jit

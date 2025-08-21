@@ -17,10 +17,7 @@
 *******************************************************************************/
 
 #include <algorithm>
-#include <assert.h>
-#include <numeric>
-
-#include "oneapi/dnnl/dnnl_debug.h"
+#include <cassert>
 
 #include "common/c_types_map.hpp"
 #include "common/dnnl_thread.hpp"
@@ -461,10 +458,9 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         static constexpr int desirable_node_size = 8;
         static constexpr int desirable_stride = 1;
 
-        // This processing is relied on swaping two innermost dimension.
-        // Therefore, input stride in second node and output stride in first node
-        // have to be equal to 1.
-
+        // This process relies on swapping the two innermost dimensions.
+        // Therefore, the input stride in the second node and output stride in
+        // first node have to be equal to 1.
         return mayiuse(sve_256) && prb_.ndims >= 2
                 && ((utils::one_of(prb_.itype, u8, data_type::s8, s32, f32)
                         && utils::one_of(
@@ -473,8 +469,8 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                 && utils::everyone_is(desirable_stride, prb_.os(0), prb_.is(1))
                 && !prb_.is_tail_present
                 && prb_.src_scale_type == scale_type_t::NONE
-                && prb_.dst_scale_type == scale_type_t::NONE
-                && prb_.beta == 0.f;
+                && prb_.dst_scale_type == scale_type_t::NONE && prb_.beta == 0.f
+                && !compensation_needed_;
     }
 
     bool process_unroll_tr8x8(const int ndims, const int len) {
@@ -807,7 +803,8 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
             // transposition on the fly
             const bool fast_return = prb_.src_scale_type != scale_type_t::MANY
                     && prb_.dst_scale_type != scale_type_t::MANY
-                    && prb_.beta == 0.f && !prb_.req_src_zp && !prb_.req_dst_zp;
+                    && prb_.beta == 0.f && !prb_.req_src_zp && !prb_.req_dst_zp
+                    && !compensation_needed_;
             if (fast_return) {
                 if (prb_.src_scale_type == scale_type_t::COMMON)
                     for (int ur = 0; ur < reg_unroll; ur += load_step)
@@ -1159,13 +1156,11 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         }
 
         if (compensation_needed_) {
-            const uint32_t xmm_begin = 9;
-            const uint32_t xmm_end = 11;
-            uint32_t xmm_id = xmm_begin;
+            uint32_t xmm_id = 0;
             const auto get_temp_xmm = [&] {
-                const Xbyak_aarch64::VReg temp {xmm_id++};
+                const Xbyak_aarch64::VReg temp {tmp_vec_idx[xmm_id]};
 
-                if (xmm_id > xmm_end) { xmm_id = xmm_begin; }
+                xmm_id = (xmm_id + 1) % tmp_vec_idx.size();
 
                 return temp;
             };

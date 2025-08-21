@@ -91,7 +91,7 @@ layout_t dpas_t::a_layout() const {
     int m_blk = exec_size;
     int inner_blk = 4 / src1_type.size();
     int outer_blk = sdepth;
-    std::vector<std::pair<int, dim_t>> blocks
+    std::vector<std::pair<pvar_t, dim_t>> blocks
             = {{1, outer_blk}, {0, m_blk}, {1, inner_blk}};
     return layout_t(src1_type, 0, 2, blocks);
 }
@@ -121,9 +121,9 @@ bool dpas_t::matches(const multiply_desc_t &desc) const {
     if (desc.m() % m_blk != 0 || desc.k() % k_blk != 0) return false;
 
     auto a_blk_layout
-            = desc.a_layout().map(tile_t(std::vector<dim_t> {m_blk, k_blk}));
+            = desc.a_layout().sub(tile_t(std::vector<dim_t> {m_blk, k_blk}));
     auto b_blk_layout
-            = desc.b_layout().map(tile_t(std::vector<dim_t> {k_blk, n_blk}));
+            = desc.b_layout().sub(tile_t(std::vector<dim_t> {k_blk, n_blk}));
 
     if (a_blk_layout != a_layout()) return false;
     if (b_blk_layout != b_layout()) return false;

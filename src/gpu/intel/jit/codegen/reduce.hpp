@@ -53,8 +53,8 @@ public:
 
         tile_t tile = find_1d_tile(src_layout_, dst_layout_);
         int tile_elems = (int)tile.elems();
-        auto src_tile_layout = src_layout_.map(tile);
-        auto dst_tile_layout = dst_layout_.map(tile);
+        auto src_tile_layout = src_layout_.sub(tile);
+        auto dst_tile_layout = dst_layout_.sub(tile);
         const auto &src_tile_blocks = src_tile_layout.blocks();
         const auto &dst_tile_blocks = dst_tile_layout.blocks();
         gpu_assert(src_tile_blocks.size() <= 1);
@@ -128,7 +128,7 @@ private:
         auto &a0 = a.blocks()[0];
         auto &b0 = b.blocks()[0];
 
-        bool ok = (a0.dim_idx == b0.dim_idx && a0.block == b0.block);
+        bool ok = (a0.dim == b0.dim && a0.block == b0.block);
         if (!ok) {
             // Try to match strided layout.
             if (a0.block == 2) {
@@ -160,7 +160,7 @@ private:
         }
 
         std::vector<dim_t> tile_dims(src_layout_.ndims(), 1);
-        tile_dims[a0.dim_idx]
+        tile_dims[a0.dim]
                 = ir_utils::max_divisor(int(a0.block), {min_step, max_step});
 
         return tile_t(tile_dims);

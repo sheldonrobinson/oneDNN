@@ -56,7 +56,7 @@ subgraph_t::subgraph_t(const std::vector<op_ptr> &ops, const dnnl::engine &eng,
         bool reset_layout)
     : graph_t(ops, static_cast<engine_kind_t>(eng.get_kind()))
     , p_engine_(&eng)
-    , fusion_info_mgr_(fpm_mode, can_use_blocked_layout) {
+    , can_use_blocked_layout_(can_use_blocked_layout) {
     set_fpmath_mode(fpm_mode.mode_, fpm_mode.apply_to_int_);
     if (reset_layout) { set_all_layout_to_any(get_mutable_ops()); }
 }
@@ -126,7 +126,7 @@ std::string layout2str(const dnnl::memory::desc &md) {
         const auto &strs = md.get_strides();
         std::copy(strs.begin(), strs.end(), strides);
 
-        utils::simultaneous_sort(strides, ou_blocks, dim_chars, ndims,
+        impl::utils::simultaneous_sort(strides, ou_blocks, dim_chars, ndims,
                 [](dim_t a, dim_t b) { return b - a; });
 
         blk_tag = std::string(dim_chars);
