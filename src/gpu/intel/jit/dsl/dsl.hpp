@@ -18,6 +18,7 @@
 #define GPU_INTEL_JIT_DSL_DSL_HPP
 
 #include "gpu/intel/jit/dsl/decl.hpp"
+#include "gpu/intel/jit/dsl/tensor.hpp"
 #include "gpu/intel/jit/ir/ir.hpp"
 #include "gpu/intel/jit/ir/kernel_info.hpp"
 #include "gpu/intel/jit/ir/message.hpp"
@@ -34,10 +35,7 @@ int grf_size();
 int min_align_2d();
 int min_pitch_2d();
 
-using tile_t = dnnl::impl::gpu::intel::jit::tile_t;
-using coord_t = dnnl::impl::gpu::intel::jit::coord_t;
 using layout_t = dnnl::impl::gpu::intel::jit::layout_t;
-using expr_t = dnnl::impl::gpu::intel::jit::expr_t;
 
 struct send_hint_t {
     send_cache_hint_t cache;
@@ -48,7 +46,7 @@ struct tensor_t {
     tensor_t(const expr_t &buf, const layout_t &layout)
         : buf(buf), layout(layout) {}
     const type_t &type() const { return layout.type(); }
-    tensor_t sub(const icoord_t &coord, const tile_t &tile) const {
+    tensor_t sub(const tile_t &tile, const icoord_t &coord) const {
         // coord is not measured relative to tile size
         for (auto &var : coord)
             gpu_assert(coord[var] % tile[var] == 0);
@@ -73,20 +71,17 @@ struct global_tensor_t {
     type_t type;
     expr_t base_offset;
     coord_t coord;
-    pvar_map_t<expr_t> sizes;
-    pvar_map_t<expr_t> strides;
+    idx_map_t<expr_t> sizes;
+    idx_map_t<expr_t> strides;
     tile_t tile;
 
     global_tensor_t() = default;
-    global_tensor_t(const expr_t &buf, const pvar_map_t<expr_t> &sizes,
-            const pvar_map_t<expr_t> &strides)
-        : buf(buf)
-        , type(buf.type().remove_ptr())
-        , sizes(sizes)
-        , strides(strides) {}
+    global_tensor_t(const expr_t &buf, const idx_map_t<expr_t> &sizes,
+            const idx_map_t<expr_t> &strides)
+        : buf(buf), type(buf.type().scalar()), sizes(sizes), strides(strides) {}
     global_tensor_t(const expr_t &buf, const type_t &type,
             const expr_t &base_offset, const coord_t &coord,
-            const pvar_map_t<expr_t> &sizes, const pvar_map_t<expr_t> &strides,
+            const idx_map_t<expr_t> &sizes, const idx_map_t<expr_t> &strides,
             const tile_t &tile)
         : buf(buf)
         , type(type)
@@ -104,7 +99,7 @@ struct global_tensor_t {
         return simplify(ret * type.size());
     }
 
-    global_tensor_t map(const tile_t &tile, const coord_t &coord) const {
+    global_tensor_t sub(const tile_t &tile, const coord_t &coord) const {
         global_tensor_t ret = *this;
         ret.coord = coord;
         ret.tile = tile;
@@ -196,22 +191,17 @@ public:
 };
 
 expr_t subgroup_id(int idx = 0);
+expr_t subgroup_local_id();
 expr_t arg(const std::string &name, bool allow_empty = false);
-// TODO: Unify def() API, keep three versions:
-// 1. def(name, type, value)
-// 2. def(name, type)
-// 3. def(name, value)
-// name goes first in all three for consistency.
-lval_t def(type_t type, const std::string &name, const expr_t &value = {},
-        bool force_alloc = false);
-lval_t def(
-        const std::string &name, const type_t &type, const expr_t &value = {});
+lval_t def(const std::string &name, const type_t &type,
+        const expr_t &value = {}, bool force_alloc = false);
 lval_t def(const std::string &name, const expr_t &value);
-tensor_t def(const layout_t &layout, const std::string &name,
-        const expr_t &value = {});
-expr_t let(type_t type, const std::string &name, const expr_t &value);
+tensor_t def(const std::string &name, const layout_t &layout,
+        type::attr_t attr = {});
+tensor_t def(const std::string &name, layout_t layout, const expr_t &value,
+        type::attr_t attr = {});
+expr_t let(const std::string &name, const type_t &type, const expr_t &value);
 expr_t let(const std::string &name, const expr_t &value);
-tensor_t def_slm(layout_t layout, const std::string &name);
 
 expr_t iif(
         const expr_t &cond, const expr_t &true_expr, const expr_t &false_expr);
@@ -232,7 +222,7 @@ void mma(const tensor_t &C, const tensor_t &A, const tensor_t &B,
 template <typename F>
 void _if(const expr_t &cond, F if_body) {
     if (is_const(cond)) {
-        if (to_cpp<bool>(cond)) {
+        if (to_bool(cond)) {
             begin_scope();
             if_body();
             end_scope();
@@ -248,7 +238,7 @@ template <typename F, typename G>
 void _if(const expr_t &cond, const F &if_body, const G &else_body) {
     if (is_const(cond)) {
         begin_scope();
-        if (to_cpp<bool>(cond)) {
+        if (to_bool(cond)) {
             if_body();
         } else {
             else_body();
@@ -280,7 +270,7 @@ void _for(const expr_t &var, const expr_t &bound, const F &body) {
 
 template <typename F>
 void _while(const expr_t &cond, F body) {
-    if (is_const(cond) && !to_cpp<bool>(cond)) return;
+    if (is_const(cond) && !to_bool(cond)) return;
     begin_scope();
     body();
     append(while_t::make(cond, pop_scope()));

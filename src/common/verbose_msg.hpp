@@ -53,7 +53,7 @@
 #define VERBOSE_BAD_PROPKIND "bad propagation kind"
 #define VERBOSE_BAD_AXIS "bad axis"
 #define VERBOSE_BAD_FLAGS "bad flags"
-#define VERBOSE_BAD_PARAM "bad param %s"
+#define VERBOSE_BAD_PARAM "bad param: %s"
 #define VERBOSE_RUNTIMEDIM_UNSUPPORTED "runtime dimension is not supported"
 #define VERBOSE_RUNTIMEDIM_INCONSISTENT \
     "runtime dimension %d is inconsistent across tensors"
@@ -85,6 +85,8 @@
 #define VERBOSE_UNSUPPORTED_POSTOP "unsupported post-ops"
 #define VERBOSE_UNSUPPORTED_SCALES_CFG "unsupported scales configuration"
 #define VERBOSE_UNSUPPORTED_ZP_CFG "unsupported zero-point configuration"
+#define VERBOSE_UNSUPPORTED_PR_CFG \
+    "unsupported precomputed reductions configuration"
 #define VERBOSE_UNSUPPORTED_BIAS_CFG "unsupported bias configuration"
 #define VERBOSE_UNSUPPORTED_DT_CFG "unsupported datatype combination"
 #define VERBOSE_UNSUPPORTED_SPARSE_CFG "unsupported sparse md configuration"

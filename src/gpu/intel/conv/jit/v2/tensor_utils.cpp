@@ -97,7 +97,8 @@ layout_tag_t make_layout_tag(tensor_kind_t tensor_kind, const std::string &s) {
     bool is_wei = (tensor_kind == tensor_kind_t::wei);
     auto desc = make_layout_desc(tensor_kind);
     auto parts = gpu_utils::split(s, ":");
-    auto type = (parts.size() > 1 ? type_t(parts[1]) : type_t::f32());
+    auto type
+            = (parts.size() > 1 ? jit::parse<type_t>(parts[1]) : type_t::f32());
     auto str_tag = desc.to_abx_tag(parts[0]);
     auto raw_tag = layout_raw_tag_t(str_tag, is_wei ? 6 : 5);
     return layout_tag_t(desc, type, raw_tag);
@@ -177,7 +178,7 @@ layout_t make_layout(tensor_kind_t tensor_kind, const layout_tag_t &_tag,
         if (tag.is_strided() && it != entries.rbegin()) {
             auto stride = prb_stride(dim, tensor_kind);
             ret.add_block(dim, block_size_expr,
-                    stride.is_undef() ? expr_t(0) : stride.var());
+                    stride.is_undef() ? expr_t(0) : var(stride));
         } else
             ret.add_block(dim, block_size_expr);
     }
@@ -264,7 +265,7 @@ layout_tag_t make_layout_tag(
     memory_desc_wrapper mdw(md);
     bool is_strided = (mdw.is_plain() && !mdw.is_dense());
     auto desc = make_layout_desc(tensor_kind);
-    type_t type(md.data_type);
+    type_t type(to_ir(md.data_type));
     if (is_any) return layout_tag_t(desc, type, layout_raw_tag_t::any());
     auto str_tag = blocked_to_str_tag(md);
     auto raw_tag = layout_raw_tag_t(str_tag);
@@ -414,7 +415,7 @@ std::vector<pvar_t> skip_mask(
         gpu_assert(view.dim_mapper().has(dim));
         // Assume that dimensions with non-trivial mapping always require
         // masking.
-        if (!view.dim_mapper().expr(dim).is_same(dim.index_var())) continue;
+        if (!view.dim_mapper().expr(dim).is_same(index_var(dim))) continue;
         // Check if the mask can be proven with known dimension requirements.
         if (!reqs.can_prove(dim_sizes.at(dim) % tile.at(dim) == 0)) continue;
         // Mask is not required for this dimension.

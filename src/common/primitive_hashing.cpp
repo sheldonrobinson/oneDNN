@@ -246,6 +246,10 @@ size_t get_attr_hash(const primitive_attr_t &attr) {
         seed = hash_combine(seed, attr.zero_points_.get_hash());
     }
 
+    if (!attr.precomputed_reductions_.has_default_values()) {
+        seed = hash_combine(seed, attr.precomputed_reductions_.get_hash());
+    }
+
     // post_ops: entry[:]
     for (int i = 0; i < attr.post_ops_.len(); i++) {
         const auto &entry = attr.post_ops_.entry_[i];
@@ -741,8 +745,10 @@ size_t get_desc_hash(const sdpa_desc_t &desc) {
     seed = hash_combine(seed, desc.vs_zero_points.get_hash());
     seed = hash_combine(seed, get_md_hash(desc.dst_desc));
     seed = hash_combine(seed, get_md_hash(desc.attn_mask_desc));
+    seed = hash_combine(seed, get_md_hash(desc.scale_desc));
     // Scale type
-    seed = hash_combine(seed, static_cast<size_t>(desc.scale_dt));
+    seed = hash_combine(seed, static_cast<size_t>(desc.kq_acc_dt));
+    seed = hash_combine(seed, static_cast<size_t>(desc.vs_acc_dt));
     seed = hash_combine(seed, desc.invert_scale);
     seed = hash_combine(seed, desc.kv_head_number);
     seed = hash_combine(seed, static_cast<size_t>(desc.mask_type));

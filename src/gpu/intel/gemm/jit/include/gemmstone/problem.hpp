@@ -58,12 +58,13 @@ inline char layoutChar(MatrixLayout layout)
 
 struct MatrixAddressing {
     MatrixLayout layout;            // Layout type (N/T/Pr/Pc)
-    uint8_t packSize = 0;           // # of elements in a packed row/column for packed layouts.
+    uint8_t pad[3] = {};
+    uint32_t packSize = 0;           // # of elements in a packed row/column for packed layouts.
+    uint16_t tileR = 0, tileC = 0;  // Tiling (0 if none) for packed layouts.
     uint8_t crosspack = 1;          // Crosspack for packed layouts.
     uint8_t alignment;              // Alignment for all addresses, offsets, and leading dimensions.
     uint8_t panelLength = 0;        // Length of the panel for packed layouts = #cols/rows for Pc/Pr respectively.
     bool needA64 = false;
-    uint16_t tileR = 0, tileC = 0;  // Tiling (0 if none) for packed layouts.
 
     void setAlignment(int align) { alignment = static_cast<uint8_t>(sanitizeAlign(align)); }
     int defaultAlignment(Type T) const {
@@ -174,6 +175,8 @@ struct GEMMProblem : public CommonProblem {
     BatchMode batch = BatchMode::None;              // Batch mode.
     int batchDims = 0;                              // # of batch dimensions (strided batch only).
     bool sumA = false, sumB = false;                // If true, calculate A row sums/B column sums and store in CO.
+    bool forceGroupSumsA = false;
+    bool forceGroupSumsB = false;
     MatrixAddressing sroundSeed;
     PostOpsProblem postOps;                         // Fused post operations to apply
 
@@ -222,11 +225,18 @@ struct GEMMProblem : public CommonProblem {
     bool gemmt() const { return false; }
     bool backward() const { return false; }
 
+    bool hasAScale() const { return (asPtrDims > -1); }
+    bool hasBScale() const { return (bsPtrDims > -1); }
+    bool hasAOffset() const { return (aoPtrDims > -1); }
+    bool hasBOffset() const { return (boPtrDims > -1); }
+
     bool aScale2D() const { return (asPtrDims >= 2); }
     bool bScale2D() const { return (bsPtrDims >= 2); }
+    bool aOffset2D() const { return (aoPtrDims >= 2); }
+    bool bOffset2D() const { return (boPtrDims >= 2); }
 
-    bool quantized2DA() const { return (aoPtrDims == 2) || aScale2D(); }
-    bool quantized2DB() const { return (boPtrDims == 2) || bScale2D(); }
+    bool quantized2DA() const { return forceGroupSumsB || aOffset2D() || aScale2D(); }
+    bool quantized2DB() const { return forceGroupSumsA || bOffset2D() || bScale2D(); }
 
     bool earlyDequantizeA() const { return (aOffset == ABOffset::Calc && earlyDequantizableOffset(Ta_ext, Tao, Ta)) || (aScale2D() && (Ta_scale.isSubsetOf(Ta) || Ta.isFP())); }
     bool earlyDequantizeB() const { return (bOffset == ABOffset::Calc && earlyDequantizableOffset(Tb_ext, Tbo, Tb)) || (bScale2D() && (Tb_scale.isSubsetOf(Tb) || Tb.isFP())); }

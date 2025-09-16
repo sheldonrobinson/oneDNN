@@ -115,11 +115,11 @@ bool is_small(const type_t &type, dim_t elems) {
 }
 
 bool is_small_ic(const problem_t &prb) {
-    return is_small(prb.src_data_type, prb.ic);
+    return is_small(to_ir(prb.src_data_type), prb.ic);
 }
 
 bool is_small_oc(const problem_t &prb) {
-    return is_small(prb.src_data_type, prb.oc);
+    return is_small(to_ir(prb.src_data_type), prb.oc);
 }
 
 status_t problem_t::init(
@@ -553,12 +553,12 @@ void init_data_tags(const config_t &cfg, const memory_desc_t &src_md,
     auto wei_compute_type = prb.is_bwd_w ? prb.c_data_type : prb.b_data_type;
 
     auto src_blk = nc_block_t::get_default_blocking(cfg.hw(), cfg.fma_kind(),
-            src_compute_type, prb.is_dw, prb.mb, prb.ic, prb.g,
+            to_ir(src_compute_type), prb.is_dw, prb.mb, prb.ic, prb.g,
             /*is_output=*/prb.is_bwd_d);
     auto dst_blk = nc_block_t::get_default_blocking(cfg.hw(), cfg.fma_kind(),
-            dst_compute_type, prb.is_dw, prb.mb, prb.oc, prb.g,
+            to_ir(dst_compute_type), prb.is_dw, prb.mb, prb.oc, prb.g,
             /*is_output=*/prb.is_fwd);
-    auto wei_blk = goi_block_t::get_default_blocking(wei_compute_type,
+    auto wei_blk = goi_block_t::get_default_blocking(to_ir(wei_compute_type),
             cfg.vec_size(), cfg.fma_kind(), prb.is_fwd, prb.is_bwd_d, prb.g,
             prb.oc, prb.ic, prb.ab_swap_transpose);
 
@@ -935,6 +935,8 @@ bool zero_points_ok(const problem_t &prb) {
             !utils::one_of(input_type, s8, u8), zp.has_default_values());
     if (!ok) return false;
 
+    if (zp.has_host_scalars()) return false;
+
     if (!zp.has_default_values(DNNL_ARG_SRC)) {
         int mask_src = zp.get_mask(DNNL_ARG_SRC);
         ok = utils::one_of(mask_src, 0, (1 << 1));
@@ -982,6 +984,8 @@ bool post_ops_ok(const problem_t &prb, const hw_t &hw) {
     if (!attr->post_ops_.check_sum_consistency(
                 prb.c_data_type, utils::one_of(input_type, s8, u8), true))
         return false;
+
+    if (attr->scales_.has_host_scalars()) return false;
 
     if (!attr->scales_.has_default_values())
         if (!prb.is_s32_accumulator() && !prb.is_fp8_conv()) return false;
@@ -1058,8 +1062,8 @@ status_t init_simd(config_t &cfg) {
     if (cfg.exec_cfg_param().is_overridden("simd")) return status::success;
 
     const auto &prb = cfg.prb();
-    int simd = get_simd_size(cfg.hw(), cfg.fma_kind(), prb.a_data_type,
-            prb.b_data_type, prb.acc_data_type);
+    int simd = get_simd_size(cfg.hw(), cfg.fma_kind(), to_ir(prb.a_data_type),
+            to_ir(prb.b_data_type), to_ir(prb.acc_data_type));
     cfg.set_simd(simd);
     return status::success;
 }
@@ -1369,7 +1373,7 @@ dim_t map_spatial(const config_t &cfg, const pvar_t &dim, const tile_t &tile) {
     dim_t padding[] = {prb.pd, prb.ph, prb.pw};
     dim_t stride[] = {prb.sd, prb.sh, prb.sw};
     dim_t dilation[] = {prb.dd, prb.dh, prb.dw};
-    int idx = dim.spatial_index();
+    int idx = spatial_index(dim);
     gpu_assert(idx != -1);
     dim_t O = tile.get(osp_dims[idx], 1);
     dim_t I = tile.get(isp_dims[idx], 1);
@@ -1541,8 +1545,8 @@ public:
         // (WHD, width is first).
         std::sort(entries_.begin(), entries_.end(),
                 [&](const entry_t &a, const entry_t &b) {
-                    int a_sp_idx = a.dim.spatial_index();
-                    int b_sp_idx = b.dim.spatial_index();
+                    int a_sp_idx = spatial_index(a.dim);
+                    int b_sp_idx = spatial_index(b.dim);
                     if (a_sp_idx >= 0 && b_sp_idx >= 0)
                         return a_sp_idx > b_sp_idx;
                     return (a_sp_idx >= 0) && (b_sp_idx < 0);
@@ -1832,8 +1836,8 @@ void validate_config_and_plan(config_t &cfg) {
         b_load_pattern = validate_blocking(
                 cfg, stride_layout_t::input_tensor_t::dst, b_2d);
     }
-    auto dummy_mem(var_t::make(type_t::byte_ptr(), "mem"));
-    auto dummy_reg(var_t::make(type_t::byte_ptr(), "reg"));
+    auto dummy_mem(var_t::make(type_t::byte(type::attr_t::ptr), "mem"));
+    auto dummy_reg(var_t::make(type_t::byte(type::attr_t::ptr), "reg"));
     if (!a_load_pattern.matches(
                 plan.x2r.a_load.create_stmt(dummy_mem, dummy_reg))) {
         gpu_warning() << "Generated load for tensor A does not match "

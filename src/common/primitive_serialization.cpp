@@ -197,6 +197,11 @@ void serialize(serialization_stream_t &sstream, const primitive_attr_t &attr) {
         attr.zero_points_.serialize(sstream);
     }
 
+    if (!attr.precomputed_reductions_.has_default_values()) {
+        sstream.append('p');
+        attr.precomputed_reductions_.serialize(sstream);
+    }
+
     // Rounding modes
     if (!attr.rounding_mode_.has_default_values()) sstream.append('r');
     for (const auto &e : attr.rounding_mode_.rounding_modes_map_) {
@@ -584,7 +589,9 @@ void serialize(serialization_stream_t &sstream, const sdpa_desc_t &desc) {
     desc.vs_zero_points.serialize(sstream);
     serialize(sstream, desc.dst_desc);
     serialize(sstream, desc.attn_mask_desc);
-    sstream.append(desc.scale_dt);
+    serialize(sstream, desc.scale_desc);
+    sstream.append(desc.kq_acc_dt);
+    sstream.append(desc.vs_acc_dt);
     sstream.append(desc.invert_scale);
     sstream.append(desc.kv_head_number);
     sstream.append(desc.mask_type);

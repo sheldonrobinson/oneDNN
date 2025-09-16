@@ -113,14 +113,14 @@ require the use of run-time controls to enable them. See
 The library is optimized for the following GPUs:
 * Intel Graphics for 11th-14th Generation Intel Core Processors
 * Intel Iris Xe MAX Graphics (formerly DG1)
-* Intel Arc(TM) graphics (formerly Alchemist)
+* Intel Arc(TM) A-Series Graphics (formerly Alchemist)
 * Intel Data Center GPU Flex Series (formerly Arctic Sound)
 * Intel Data Center GPU Max Series (formerly Ponte Vecchio)
-* Intel Graphics and Intel Arc graphics for Intel Core Ultra processors
+* Intel Graphics and Intel Arc Graphics for Intel Core Ultra processors
   (formerly Meteor Lake, Arrow Lake and Lunar Lake)
-* Intel Arc B-series graphics and Intel Arc Pro B-series graphics
+* Intel Arc B-Series Graphics and Intel Arc Pro B-Series Graphics
   (formerly Battlemage)
-* Intel Arc graphics for future Intel Core Ultra processors
+* Intel Arc Graphics for future Intel Core Ultra processors
   (code name Panther Lake)
 
 [CPU dispatcher control]: https://uxlfoundation.github.io/oneDNN/dev_guide_cpu_dispatcher_control.html
@@ -181,7 +181,7 @@ On a CPU based on Arm AArch64 architecture, oneDNN CPU engine can be built with
 machine learning applications and provides AArch64 optimized implementations
 of core functions. This functionality currently requires that ACL is downloaded
 and built separately. See [Build from Source] section of the Developer Guide for
-details. The minimum supported version of ACL is 52.2.0.
+details. The minimum supported version of ACL is 52.4.0.
 
 [Arm Compute Library (ACL)]: https://github.com/arm-software/ComputeLibrary
 

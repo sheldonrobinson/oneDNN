@@ -266,45 +266,6 @@ inline std::ostream &operator<<(std::ostream &out, const std::vector<T> &v) {
     return out;
 }
 
-template <typename T, typename = void>
-struct str_ostream_helper_t {
-    static std::string call(const T &t) {
-        gpu_error_not_expected();
-        return {};
-    }
-};
-
-template <typename T>
-struct str_ostream_helper_t<T,
-        decltype(std::declval<std::ostream>() << std::declval<T>(), void())> {
-    static std::string call(const T &t) {
-        ostringstream_t oss;
-        oss << t;
-        return oss.str();
-    }
-};
-
-template <typename T, typename = void>
-struct str_helper_t {
-    static std::string call(const T &t) {
-        return str_ostream_helper_t<T>::call(t);
-    }
-};
-
-template <typename T>
-struct str_helper_t<T, decltype(std::declval<T>().str(), void())> {
-    static std::string call(const T &t) { return t.str(); }
-};
-
-template <typename T>
-struct str_helper_t<std::vector<T>, void> {
-    static std::string call(const std::vector<T> &v) {
-        ostringstream_t oss;
-        oss << v;
-        return oss.str();
-    }
-};
-
 // Helper class to pretty-print tables.
 // Each operator<<() call corresponds to one cell/header. std::endl or '/n'
 // moves to the next row.
@@ -691,15 +652,15 @@ inline bool stream_try_match(std::istream &in, const std::string &s) {
 }
 
 template <typename T>
-using enum_name_t = std::pair<T, const char *>;
+using enum_name_t = std::pair<T, const std::string>;
 
 template <typename T>
-std::pair<T, const char *> make_enum_name(const T &value, const char *name) {
+enum_name_t<T> make_enum_name(const T &value, const char *name) {
     return std::make_pair(value, name);
 }
 
 template <typename E, size_t N>
-std::string to_string_impl(
+const std::string &to_string_impl(
         E e, const std::array<enum_name_t<E>, N> &enum_names);
 
 template <typename E, size_t N>
@@ -711,7 +672,7 @@ bool is_enum_name_templ_impl(
         const std::string &s, const std::array<enum_name_t<E>, N> &enum_names);
 
 #define GPU_DEFINE_PARSE_ENUM(enum_type, enum_names) \
-    inline std::string to_string(enum_type e) { \
+    inline const std::string &to_string(enum_type e) { \
         return to_string_impl(e, enum_names); \
     } \
     inline void to_enum_impl( \
@@ -1140,12 +1101,13 @@ private:
 };
 
 template <typename E, size_t N>
-std::string to_string_impl(
+const std::string &to_string_impl(
         E e, const std::array<enum_name_t<E>, N> &enum_names) {
     for (auto &p : enum_names)
         if (p.first == e) return p.second;
     gpu_error_not_expected();
-    return {};
+    static const std::string invalid = "(invalid enum)";
+    return invalid;
 }
 
 template <typename E, size_t N>

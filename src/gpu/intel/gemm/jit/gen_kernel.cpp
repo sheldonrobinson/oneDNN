@@ -281,15 +281,17 @@ status_t gen_desc_t::finalize(const char *tags) {
 
     strategy_.relaxedAccumulation |= relaxed_acc_;
     strategy_.systolicAvailable &= !disable_systolic_;
+    if (problem_.needsAGroupSums() || problem_.needsBGroupSums())
+        problem_.autoTypeConversions(hw_, strategy_.systolicAvailable);
     try {
         strategy_.preflight(hw_, problem_);
     } catch (...) { return status::unimplemented; }
 
     // Check for legal 2D quantization group size.
-    if (problem_.aoPtrDims == 2 || problem_.aScale2D())
+    if (problem_.aOffset2D() || problem_.aScale2D())
         if (problem_.aqGroupK % strategy_.aqGroupKGranularity())
             return status::unimplemented;
-    if (problem_.boPtrDims == 2 || problem_.bScale2D())
+    if (problem_.bOffset2D() || problem_.bScale2D())
         if (problem_.bqGroupK % strategy_.bqGroupKGranularity())
             return status::unimplemented;
 
@@ -470,8 +472,8 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
     problem_.BO.layout = MatrixLayout::T;
     problem_.AO.crosspack = problem_.BO.crosspack = 1;
     problem_.AO.packSize = problem_.BO.packSize = 0;
-    problem_.A_scale = problem_.AO;
-    problem_.B_scale = problem_.BO;
+    problem_.A_scale = problem_.Ag = problem_.AO;
+    problem_.B_scale = problem_.Bg = problem_.BO;
     if (a_quant.zp_type != data_type::undef)
         problem_.AO.setAlignment(int(types::data_type_size(a_quant.zp_type)));
     if (b_quant.zp_type != data_type::undef)
@@ -544,12 +546,36 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
 
     problem_.sumA = (reduce_ab == sum_ab::sum_b_col);
     problem_.sumB = (reduce_ab == sum_ab::sum_a_row);
+    problem_.forceGroupSumsA = a_quant.force_gs;
+    problem_.forceGroupSumsB = b_quant.force_gs;
 
     problem_.postOps.cStochasticRound = dst_sround;
+
+    if (problem_.needsAGroupSums() || problem_.needsBGroupSums())
+        problem_.autoTypeConversions(hw_, has_systolic);
+
+    if (problem_.needsAGroupSums()) {
+        problem_.Tag = convert_dnnl_to_kernel_type(a_quant.gs_type);
+        problem_.Ag.layout = MatrixLayout::N;
+        problem_.Ag.setAlignment(problem_.Tag.paddedSize());
+        if (problem_.bqGroupK == 0) problem_.bqGroupK = problem_.aqGroupK;
+        if (problem_.aqGroupK == 0) problem_.aqGroupK = problem_.bqGroupK;
+    }
+    if (problem_.needsBGroupSums()) {
+        problem_.Tbg = convert_dnnl_to_kernel_type(b_quant.gs_type);
+        problem_.Bg.layout = MatrixLayout::N;
+        problem_.Bg.setAlignment(problem_.Tbg.paddedSize());
+        if (problem_.aqGroupK == 0) problem_.aqGroupK = problem_.bqGroupK;
+        if (problem_.bqGroupK == 0) problem_.bqGroupK = problem_.aqGroupK;
+    }
 
     // Select a kernel from the catalog.
     std::vector<MatchParams> match_params;
     MatchParams base(hw_, has_systolic, is_integrated, problem_);
+
+    // By default gemmstone assumes that the accumulation type must be at least
+    // as wide as the output type. For oneDNN this restriction is not needed.
+    base.precisionCExt = '\0';
 
     base.sizes.m = m;
     base.sizes.n = n;
@@ -594,7 +620,8 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
     mod_match(base,
             ((a_quant.scale_ndims >= 2 || b_quant.scale_ndims >= 2)
                     && a_quant.zp_ndims > -1 && problem_.Ta_ext.isInt8()
-                    && problem_.Tb_ext.isInt8() && problem_.Tc.isFP()),
+                    && problem_.Tb_ext.isInt8() && problem_.Tc.isFP()
+                    && !problem_.forceGroupSumsA && !problem_.forceGroupSumsB),
             [](Type dt) -> const char * {
                 if (dt.isInt8()) return "[OH]";
                 return nullptr;
@@ -796,6 +823,10 @@ status_t gen_xe_systolic_kernel_desc_t::select_kernel(compute::gpu_arch_t arch,
     // Find it in the catalog.
     MatchParams match_params(hw_, true, is_integrated, problem_);
 
+    // By default gemmstone assumes that the accumulation type must be at least
+    // as wide as the output type. For oneDNN this restriction is not needed.
+    match_params.precisionCExt = '\0';
+
     match_params.sizes.m = m;
     match_params.sizes.n = n;
     match_params.sizes.k = k;
@@ -889,6 +920,8 @@ void gen_kernel_t::init_interface() {
     auto co_access = strategy.CO.getGlobalAccessType();
     auto as_access = strategy.A_scale.getGlobalAccessType();
     auto bs_access = strategy.B_scale.getGlobalAccessType();
+    auto ag_access = strategy.Ag.getGlobalAccessType();
+    auto bg_access = strategy.Bg.getGlobalAccessType();
 
     interface_.newArgument("A", ExternalArgumentType::GlobalPtr, a_access);
     interface_.newArgument("B", ExternalArgumentType::GlobalPtr, b_access);
@@ -916,9 +949,15 @@ void gen_kernel_t::init_interface() {
     if (problem.bScale2D())
         interface_.newArgument(
                 "b_scale_ptr", ExternalArgumentType::GlobalPtr, bs_access);
-    if (problem.aoPtrDims == 2 || problem.aScale2D())
+    if (problem.needsAGroupSums())
+        interface_.newArgument(
+                "ag_ptr", ExternalArgumentType::GlobalPtr, ag_access);
+    if (problem.needsBGroupSums())
+        interface_.newArgument(
+                "bg_ptr", ExternalArgumentType::GlobalPtr, bg_access);
+    if (problem.aOffset2D() || problem.aScale2D() || problem.needsAGroupSums())
         interface_.newArgument("ldaq", DataType::d);
-    if (problem.boPtrDims == 2 || problem.bScale2D())
+    if (problem.bOffset2D() || problem.bScale2D() || problem.needsBGroupSums())
         interface_.newArgument("ldbq", DataType::d);
     if (problem.cOffset != COffset::None || problem.sumA || problem.sumB) {
         interface_.newArgument(
@@ -952,13 +991,21 @@ void gen_kernel_t::init_interface() {
             interface_.newArgument("stride_A" + std::to_string(i), DataType::d);
             interface_.newArgument("stride_B" + std::to_string(i), DataType::d);
             interface_.newArgument("stride_C" + std::to_string(i), DataType::d);
-            if (problem.asPtrDims > 2) {
+            if (problem.hasAScale()) {
                 interface_.newArgument(
                         "scale_stride_A" + std::to_string(i), DataType::d);
             }
-            if (problem.bsPtrDims > 2) {
+            if (problem.hasBScale()) {
                 interface_.newArgument(
                         "scale_stride_B" + std::to_string(i), DataType::d);
+            }
+            if (problem.hasAOffset()) {
+                interface_.newArgument(
+                        "offset_stride_A" + std::to_string(i), DataType::d);
+            }
+            if (problem.hasBOffset()) {
+                interface_.newArgument(
+                        "offset_stride_B" + std::to_string(i), DataType::d);
             }
         }
         for (size_t i = 0; i < problem.postOps.len(); i++) {

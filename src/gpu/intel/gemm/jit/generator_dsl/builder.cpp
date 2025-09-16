@@ -67,7 +67,7 @@ struct transform_t {
     transform_t() = default;
 
     transform_t(kind_t t_kind, int pack_size, ngen::CacheSettingsLSC cache_hint,
-            std::array<ir::pvar_t, 2> dims)
+            std::array<idx_t, 2> dims)
         : kind(t_kind)
         , pack_size(pack_size)
         , cache_hint(to_ir(cache_hint))
@@ -137,12 +137,12 @@ struct transform_t {
     kind_t kind = kind_t::none;
     int pack_size = 0;
     ir::send_cache_hint_t cache_hint = ir::send_cache_hint_t::undef;
-    std::array<ir::pvar_t, 2> dims = {};
+    std::array<idx_t, 2> dims = {};
 };
 
-const ir::pvar_t &m_var = ir::pvars::m;
-const ir::pvar_t &n_var = ir::pvars::n;
-const ir::pvar_t &k_var = ir::pvars::k;
+static const idx_t m_var("m");
+static const idx_t n_var("n");
+static const idx_t k_var("k");
 
 struct kloop_iterator_t {
 
@@ -167,7 +167,7 @@ struct kloop_iterator_t {
 };
 
 transform_t get_transform(const MatrixAddressingStrategy &matrix_strategy,
-        std::array<ir::pvar_t, 2> dims, bool is_prefetch = false) {
+        std::array<idx_t, 2> dims, bool is_prefetch = false) {
     switch (matrix_strategy.accessType) {
         case AccessType::Scattered:
             // TODO: Remove workaround unimplemented scattered->vnni support.
@@ -198,7 +198,7 @@ transform_t get_transform(const MatrixAddressingStrategy &matrix_strategy,
     }
 };
 ir::pvar_map_t<expr_t> get_strides(
-        MatrixLayout layout, std::array<ir::pvar_t, 2> pvars, expr_t ld) {
+        MatrixLayout layout, std::array<idx_t, 2> pvars, expr_t ld) {
     switch (layout) {
         case MatrixLayout::N: return {{pvars[0], 1}, {pvars[1], ld}};
         case MatrixLayout::T: return {{pvars[0], ld}, {pvars[1], 1}};
@@ -222,7 +222,7 @@ struct tensor_config_t {
 
 void apply_post_ops(const dnnl::impl::gpu::intel::gpu_post_ops_t &ops,
         const tensor_t &C, const std::vector<expr_t> &idxs,
-        const std::vector<ir::pvar_t> &dims) {
+        const std::vector<idx_t> &dims) {
     for (size_t i = 0; i < ops.len(); i++) {
         if (ops[i].is_eltwise()) {
             gpu_assert(false) << "Unimplemeted";
@@ -265,8 +265,9 @@ void apply_post_ops(const dnnl::impl::gpu::intel::gpu_post_ops_t &ops,
                             : expr_t(0); //TODO: Get actual size
                 }
 
-                return {arg("binary" + i_s), e.src1_desc.dt, src_g_offset,
-                        coord_t(), g_sizes, g_strides, {}};
+                return {arg("binary" + i_s),
+                        dnnl::impl::gpu::intel::jit::to_ir(e.src1_desc.dt),
+                        src_g_offset, coord_t(), g_sizes, g_strides, {}};
             }();
 
             layout_t src_layout = {src_g.type};
@@ -280,7 +281,7 @@ void apply_post_ops(const dnnl::impl::gpu::intel::gpu_post_ops_t &ops,
                 }
             }
 
-            tensor_t src = def(src_layout, "binary" + i_s + "_blk");
+            tensor_t src = def("binary" + i_s + "_blk", src_layout);
             std::cout << "src_g: " << src_g.str() << "\n";
             std::cout << "src: " << src.str() << "\n";
             load(src, src_g);
@@ -442,9 +443,9 @@ struct generator_dsl_t {
         auto n_blk = strategy.unroll[LoopN];
         auto k_blk = strategy.unroll[LoopK];
 
-        std::array<ir::pvar_t, 2> A_vars = {m_var, k_var};
-        std::array<ir::pvar_t, 2> B_vars = {k_var, n_var};
-        std::array<ir::pvar_t, 2> C_vars = {m_var, n_var};
+        std::array<idx_t, 2> A_vars = {m_var, k_var};
+        std::array<idx_t, 2> B_vars = {k_var, n_var};
+        std::array<idx_t, 2> C_vars = {m_var, n_var};
 
         auto A_prefetch_transform
                 = get_transform(strategy.A_prefetch, A_vars, true);
@@ -457,11 +458,10 @@ struct generator_dsl_t {
         ir::tile_t C_dims {{{m_var, m_blk}, {n_var, n_blk}}};
         auto C_store_transform = get_transform(strategy.C, C_vars);
 
-        tensor_t C
-                = def(C_store_transform.get_layout(C_dims, into_ir(problem.Tc)),
-                        "C_blk", 0);
+        tensor_t C = def("C_blk",
+                C_store_transform.get_layout(C_dims, into_ir(problem.Tc)), 0);
 
-        ir::pvar_t subgroup_dim = C.layout.blocks()[0].dim;
+        idx_t subgroup_dim = C.layout.blocks()[0].dim;
         int m_group_idx = strategy.loopOrder[0] == LoopM ? 0 : 1;
         auto m_idx = let("m_idx",
                 (group_id(m_group_idx) * local_size(m_group_idx)
@@ -474,7 +474,7 @@ struct generator_dsl_t {
                         + local_id(n_group_idx))
                         * (subgroup_dim == n_var ? n_blk / strategy.subgroupSize
                                                  : n_blk));
-        auto k_idx = def(k.type(), "k_idx", 0);
+        auto k_idx = def("k_idx", k.type(), 0);
 
         auto offset_A = arg("offset_A");
         auto offset_B = arg("offset_B");
@@ -629,8 +629,8 @@ struct generator_dsl_t {
         auto kloop_it = cfg.kloop_it;
         auto &C = cfg.C;
 
-        tensor_t A = def(cfg.A_load.layout, "A_blk");
-        tensor_t B = def(cfg.B_load.layout, "B_blk");
+        tensor_t A = def("A_blk", cfg.A_load.layout);
+        tensor_t B = def("B_blk", cfg.B_load.layout);
 
         int mma_k_blk
                 = std::min(cfg.A_load.tile[k_var], cfg.B_load.tile[k_var]);
@@ -656,7 +656,7 @@ struct generator_dsl_t {
             int idx = pipeline_idx(k_unroll_idx, cfg.A_load_warmup(),
                     cfg.A_load.layout.dim(k_var));
             if (idx % A_load_blk != 0) return;
-            load(A.sub({{k_var, idx}}, cfg.A_load.tile), kloop_it.A_load(),
+            load(A.sub(cfg.A_load.tile, {{k_var, idx}}), kloop_it.A_load(),
                     {{k_var, 0}}, {cfg.A_load.transform.cache_hint});
             kloop_it.A_load_inc(A_load_blk);
         };
@@ -678,7 +678,7 @@ struct generator_dsl_t {
             int idx = pipeline_idx(k_unroll_idx, cfg.B_load_warmup(),
                     cfg.B_load.layout.dim(k_var));
             if (idx % B_load_blk != 0) return;
-            load(B.sub({{k_var, idx}}, cfg.B_load.tile), kloop_it.B_load(),
+            load(B.sub(cfg.B_load.tile, {{k_var, idx}}), kloop_it.B_load(),
                     {{k_var, 0}}, {cfg.B_load.transform.cache_hint});
             kloop_it.B_load_inc(B_load_blk);
         };

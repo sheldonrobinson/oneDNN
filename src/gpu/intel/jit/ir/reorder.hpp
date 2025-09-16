@@ -28,12 +28,11 @@ namespace jit {
 
 // Implements reorder between GRF buffers in given layouts. Conversion between
 // data types is supported.
-class reorder_t : public func_impl_t {
+class reorder_t : public func_impl_t, public object::info_t<reorder_t> {
 public:
-    IR_DECL_TYPE(reorder_t)
-
-    static func_t make(layout_t src_layout, layout_t dst_layout) {
-        reorder::jit::normalize(src_layout, dst_layout);
+    static func_t make(layout_t src_layout, layout_t dst_layout,
+            bool do_normalize = true) {
+        if (do_normalize) reorder::jit::normalize(src_layout, dst_layout);
         return func_t(
                 new reorder_t(std::move(src_layout), std::move(dst_layout)));
     }
@@ -52,7 +51,7 @@ public:
 
 private:
     reorder_t(layout_t src_layout, layout_t dst_layout)
-        : func_impl_t(_type_info())
+        : func_impl_t(get_info())
         , src_layout(std::move(src_layout))
         , dst_layout(std::move(dst_layout)) {}
 };

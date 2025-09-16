@@ -610,7 +610,9 @@ status_t brg_blocking_t::estimate_brgemm_ur() {
                 = exec_type == exec_trans && ic_block % simd_w == 0 && !is_xf32
                 ? simd_w
                 : vnni_block;
-        K_tail = kh_koef * rnd_up(ic % ic_block, ic_ceil);
+        K_tail = kh_koef
+                * (exec_type == exec_trans ? rnd_up(ic % ic_block, ic_ceil)
+                                           : (ic % ic_block));
     }
 
     const auto vK = K > 0 ? K : K_tail;
@@ -1644,7 +1646,7 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     // Big int (> INT_MAX) values are unsupported and jcp fields may overflow
     // TODO: change data type of jcp fields to size_t
     VDISPATCH_CONV_IC(!has_large_size(cd, src_d, weights_d, dst_d),
-            VERBOSE_BAD_PARAM, "Large size is not supported");
+            VERBOSE_BAD_PARAM, "large size is not supported");
 
     const bool with_groups = weights_d.ndims() == src_d.ndims() + 1;
     int ndims = src_d.ndims();
@@ -2397,9 +2399,10 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             + utils::div_up(abs(jcp.back_pad), jcp.dilate_d + 1);
     const auto kh_cnt = 1 + utils::div_up(abs(jcp.t_pad), jcp.dilate_h + 1)
             + utils::div_up(abs(jcp.b_pad), jcp.dilate_h + 1);
-    jcp.ker_ranges_size = jcp.exec_type == exec_trans
-            ? kd_cnt * nstl::min(jcp.oh, jcp.oh_block + kh_cnt)
-            : kd_cnt * kh_cnt;
+    jcp.ker_ranges_size = jcp.exec_type == exec_trans ? kd_cnt
+                    * nstl::min(
+                            jcp.oh, rnd_up(jcp.oh_block + kh_cnt, jcp.oh_block))
+                                                      : kd_cnt * kh_cnt;
     const auto comp_buffer_ow = jcp.exec_type != exec_vpad ? jcp.ow : 1;
     jcp.comp_a_buffer_size = jcp.ngroups * jcp.nb_oc * jcp.ker_ranges_size
             * comp_buffer_ow * jcp.oc_block;

@@ -740,6 +740,12 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
         ss << field_delim() << "attr-zero-points:" << zero_points.get_verbose();
     }
 
+    const precomputed_reductions_t &pr = attr->precomputed_reductions_;
+    if (!pr.has_default_values()) {
+        ss << field_delim()
+           << "attr-precomputed-reductions:" << pr.get_verbose();
+    }
+
     const post_ops_t &po = attr->post_ops_;
     if (!po.has_default_values()) {
         std::string delim = empty_delim;
@@ -1626,7 +1632,11 @@ std::string init_info_sdpa(const engine_t *e, const pd_t *pd) {
             ss << "div:";
         else
             ss << "mul:";
-        ss << dnnl_dt2str(desc->scale_dt);
+        ss << dnnl_dt2str(pd->scale_md()->data_type) << ":";
+        if (pd->with_host_scale())
+            ss << "host";
+        else
+            ss << "device";
     }
 
     ss << "," << md2dim_str(pd->qry_md()) << ":" << md2dim_str(pd->key_md())

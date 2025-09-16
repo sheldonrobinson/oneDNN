@@ -278,7 +278,7 @@ public:
 
     layout_t(const memory_desc_wrapper &mdw, const std::string &format,
             bool do_normalize = true)
-        : layout_t(mdw.data_type(), mdw.offset0(), format,
+        : layout_t(to_ir(mdw.data_type()), mdw.offset0(), format,
                 std::vector<dim_t>(mdw.dims(), mdw.dims() + mdw.ndims()),
                 do_normalize) {}
 
@@ -321,8 +321,8 @@ public:
 
     bool is_empty() const { return ndims_ == 0; }
     bool with_ndims() const { return ndims_ != dim_idx::invalid; }
-    dim_idx_t ndims() const {
-        gpu_assert(with_ndims());
+    dim_idx_t ndims(bool check_invalid = true) const {
+        if (check_invalid) gpu_assert(with_ndims());
         return ndims_;
     }
 
@@ -436,7 +436,7 @@ public:
 
     bool is_strictly_equal(const layout_t &other, bool compare_offset = true,
             bool compare_strides = true) const {
-        if (!type_.is_equal(other.type_)) return false;
+        if (type_ != other.type_) return false;
         if (compare_offset && !offset_.is_equal(other.offset_)) return false;
         if (blocks_.size() != other.blocks_.size()) return false;
         for (size_t i = 0; i < blocks_.size(); i++) {
@@ -453,7 +453,7 @@ public:
 
     bool operator!=(const layout_t &other) const { return !operator==(other); }
     bool operator<=(const layout_t &other) const {
-        if (!type_.is_equal(other.type_)) return false;
+        if (type_ != other.type_) return false;
         auto other_blocks = other.normalize().blocks();
         auto self_blocks = normalize().blocks();
         if (self_blocks.size() > other_blocks.size()) return false;
@@ -492,10 +492,12 @@ public:
             return "(scalar:" + type().str() + ")";
 
         auto to_str = [](const pvar_t &dim, bool is_outer) {
-            if (dim.name().length() == 1)
-                return std::string(
-                        1, into<char>((is_outer ? 'A' : 'a') + dim.index()));
-            return "<" + dim.str() + ">";
+            auto ret = dim.str();
+            if (ret.length() == 1) {
+                if (is_outer) ret[0] -= 'a' - 'A';
+                return ret;
+            }
+            return "<" + ret + ">";
         };
         std::string ret;
         stride_t dense_stride(1);
@@ -1108,7 +1110,7 @@ public:
         }
         outer_blocks.insert(outer_blocks.end(),
                 blocks.begin() + (block_idx_ + 1), blocks.end());
-        return layout_t(l_.type(), l_.ndims(), l_.offset(), outer_blocks);
+        return layout_t(l_.type(), l_.ndims(false), l_.offset(), outer_blocks);
     }
 
 private:
@@ -1181,7 +1183,7 @@ public:
     }
 
     mask_tensor_t sub(const tile_t &tile, const coord_t &start) const {
-        icoord_t tile_start(start);
+        coord_t tile_start(start);
         auto sub_layout = layout_.sub(tile);
         mask_tensor_t sub_mask(sub_layout);
         for_each(tile, [&](const icoord_t &sub_start) {
