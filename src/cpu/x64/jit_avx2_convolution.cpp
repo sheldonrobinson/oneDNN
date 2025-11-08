@@ -61,7 +61,16 @@ void jit_avx2_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     const size_t work_amount
             = jcp.mb * jcp.ngroups * ocb_work * jcp.od * jcp.oh;
 
-    auto ker = [&](const int ithr, const int nthr) {
+    if (pd()->wants_padded_bias()) {
+        auto padded_bias = ctx.get_scratchpad_grantor().get<data_t>(
+                key_conv_padded_bias);
+        utils::array_copy(padded_bias, bias, jcp.oc_without_padding);
+        utils::array_set(padded_bias + jcp.oc_without_padding, 0.f,
+                jcp.oc - jcp.oc_without_padding);
+        bias = padded_bias;
+    }
+
+    parallel(jcp.nthr, [&](const int ithr, const int nthr) {
         size_t start {0}, end {0};
         balance211(work_amount, nthr, ithr, start, end);
 
@@ -172,18 +181,7 @@ void jit_avx2_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             }
             icbb += icb_step;
         }
-    };
-
-    if (pd()->wants_padded_bias()) {
-        auto padded_bias = ctx.get_scratchpad_grantor().get<data_t>(
-                key_conv_padded_bias);
-        utils::array_copy(padded_bias, bias, jcp.oc_without_padding);
-        utils::array_set(padded_bias + jcp.oc_without_padding, 0.f,
-                jcp.oc - jcp.oc_without_padding);
-        bias = padded_bias;
-    }
-
-    parallel(jcp.nthr, ker);
+    });
 
     if (pd()->wants_zero_pad_dst()) ctx.zero_pad_output(DNNL_ARG_DST);
 }
@@ -352,7 +350,7 @@ void jit_avx2_convolution_bwd_weights_t::execute_backward_weights(
     auto diff_weights = CTX_OUT_MEM(data_t *, DNNL_ARG_DIFF_WEIGHTS);
     auto diff_bias_in = CTX_OUT_MEM(data_t *, DNNL_ARG_DIFF_BIAS);
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     const auto &jcp = kernel_->jcp;
 
@@ -367,13 +365,13 @@ void jit_avx2_convolution_bwd_weights_t::execute_backward_weights(
     const memory_desc_wrapper diff_dst_d(pd()->diff_dst_md());
     const memory_desc_wrapper diff_weights_d(pd()->diff_weights_md(0));
 
-    auto reducer_bia_scratchpad
-            = memory_tracking::grantor_t(scratchpad, prefix_reducer_bia);
+    memory_tracking::grantor_t reducer_bia_scratchpad(
+            scratchpad, prefix_reducer_bia);
     auto rb = this->reducer_bias_.get();
     rb->init(reducer_bia_scratchpad);
 
-    auto reducer_wei_scratchpad
-            = memory_tracking::grantor_t(scratchpad, prefix_reducer_wei);
+    memory_tracking::grantor_t reducer_wei_scratchpad(
+            scratchpad, prefix_reducer_wei);
     auto rw = this->reducer_weights_.get();
     rw->init(reducer_wei_scratchpad);
 

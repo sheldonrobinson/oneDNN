@@ -299,7 +299,7 @@ static void compute_src_zp_compensation(const exec_ctx_t &ctx,
         const cpu_deconvolution_fwd_pd_t *pd) {
     using namespace memory_tracking::names;
 
-    const auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
     int32_t *zp_compensation = scratchpad.get<int32_t>(key_deconv_zp);
     const auto G = pd->G();
     const auto KH = pd->KH();
@@ -429,7 +429,7 @@ static status_t apply_src_zero_point(const exec_ctx_t &ctx,
     const bool is_src_zp_common
             = pd->attr()->zero_points_.get_mask(DNNL_ARG_SRC) == 0;
 
-    const auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
     const int32_t *const zp_src_compensation
             = scratchpad.get<int32_t>(key_deconv_zp);
     const memory_desc_wrapper dst_d(pd->dst_md());
@@ -469,7 +469,7 @@ static status_t apply_src_zero_point(const exec_ctx_t &ctx,
 
 status_t ref_deconvolution_fwd_t::execute(const exec_ctx_t &ctx) const {
     using namespace memory_tracking::names;
-    const auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
     const bool ref_bias = pd()->with_bias() && !pd()->conv_supports_bias_;
     const bool non_default_attr = !pd()->attr()->has_default_values();
 
@@ -481,10 +481,10 @@ status_t ref_deconvolution_fwd_t::execute(const exec_ctx_t &ctx) const {
         conv_args[DNNL_ARG_BIAS] = args.at(DNNL_ARG_BIAS);
 
     // Create intermediate memory for f32 output if needed.
-    auto dst = args.at(DNNL_ARG_DST);
+    const auto &dst = args.at(DNNL_ARG_DST);
     std::unique_ptr<memory_t, memory_deleter_t> tmp_memory;
     CHECK(safe_ptr_assign(tmp_memory,
-            new memory_t(dst.mem->engine(), pd()->conv_pd_->diff_src_md(),
+            new memory_t(dst.mem()->engine(), pd()->conv_pd_->diff_src_md(),
                     scratchpad.get_memory_storage(key_deconv_bias))));
     memory_arg_t tmp_conv_output = {tmp_memory.get(), false};
 
@@ -512,8 +512,9 @@ status_t ref_deconvolution_fwd_t::execute(const exec_ctx_t &ctx) const {
 
     exec_ctx_t conv_ctx(ctx, std::move(conv_args));
 
-    nested_scratchpad_t ns(ctx, key_nested, conv_p_);
-    conv_ctx.set_scratchpad_grantor(ns.grantor());
+    auto *nested_grantor = create_nested_grantor(ctx.get_scratchpad_grantor(),
+            key_nested, conv_p_->pd()->scratchpad_registry());
+    conv_ctx.set_scratchpad_grantor(nested_grantor);
     auto status = conv_p_->execute(conv_ctx);
     if (status != status::success) return status;
 
@@ -561,8 +562,9 @@ status_t ref_deconvolution_bwd_data_t::execute(const exec_ctx_t &ctx) const {
     conv_args[DNNL_ARG_DST] = args.at(DNNL_ARG_DIFF_SRC);
     exec_ctx_t conv_ctx(ctx, std::move(conv_args));
 
-    nested_scratchpad_t ns(ctx, key_nested, conv_p_);
-    conv_ctx.set_scratchpad_grantor(ns.grantor());
+    auto *nested_grantor = create_nested_grantor(ctx.get_scratchpad_grantor(),
+            key_nested, conv_p_->pd()->scratchpad_registry());
+    conv_ctx.set_scratchpad_grantor(nested_grantor);
     conv_p_->execute(conv_ctx);
     return status::success;
 }
@@ -721,8 +723,9 @@ status_t ref_deconvolution_bwd_weights_t::execute(const exec_ctx_t &ctx) const {
     conv_args[DNNL_ARG_DIFF_WEIGHTS] = args.at(DNNL_ARG_DIFF_WEIGHTS);
     exec_ctx_t conv_ctx(ctx, std::move(conv_args));
 
-    nested_scratchpad_t ns(ctx, key_nested, conv_p_);
-    conv_ctx.set_scratchpad_grantor(ns.grantor());
+    auto *nested_grantor = create_nested_grantor(ctx.get_scratchpad_grantor(),
+            key_nested, conv_p_->pd()->scratchpad_registry());
+    conv_ctx.set_scratchpad_grantor(nested_grantor);
     status_t status = conv_p_->execute(conv_ctx);
     if (status != status::success) return status;
 

@@ -46,8 +46,8 @@ namespace {
 // A proper approach would be an implementation-specific unpoisoning.
 void unpoison_outputs(const exec_args_t &args) {
     for (const auto &arg : args) {
-        if (arg.second.is_const) continue;
-        auto *mem = arg.second.mem;
+        if (arg.second.is_const()) continue;
+        auto *mem = arg.second.mem();
         void *p;
         mem->get_data_handle(&p);
         size_t s = memory_desc_wrapper(*mem->md()).size();
@@ -329,13 +329,21 @@ status_t dnnl_primitive::execute(exec_ctx_t &ctx) const {
         mem_storage = scratchpad_->get_memory_storage();
     }
 
-    auto scratchpad_grantor
-            = primitive_->pd()->scratchpad_registry().grantor(mem_storage, ctx);
-    ctx.set_scratchpad_grantor(&scratchpad_grantor);
+    // Obtain a scratchpad memory storage host ptr from the context.
+    // `require_host_ptr = true` guarantees a nullptr will be returned if the
+    // usage model doesn't assume memory mapping.
+    // It's the only pointer that a grantor object requires to provide to
+    // sub-storages for nested primitives.
+    const void *mapped_mem_storage_ptr
+            = ctx.host_ptr(mem_storage, /* require_host_ptr = */ true);
+
+    auto *scratchpad_grantor
+            = primitive_->pd()->scratchpad_registry().create_grantor(
+                    mem_storage, mapped_mem_storage_ptr);
+    ctx.set_scratchpad_grantor(scratchpad_grantor);
     ctx.set_resource_mapper(&resource_mapper_);
 
     auto status = primitive_->execute(ctx);
-    ctx.set_scratchpad_grantor(nullptr);
     return status;
 }
 

@@ -124,42 +124,64 @@ void memory_registry_t::add_device(void *ptr, size_t size) {
     std::lock_guard<std::mutex> g(m_);
     if (!ptr) return;
 
-    assert(allocations_device_.find(ptr) == allocations_device_.end());
-    allocations_device_.emplace(std::pair<void *, size_t>(ptr, size));
-    total_size_gpu_ += size;
+    // A repeated pointer can happen in CPU SYCL scenario when performing
+    // `create_from_host_ptr` for the already created memory.
+    if (allocations_device_.find(ptr) != allocations_device_.end()) {
+        BENCHDNN_PRINT(8,
+                "[CHECK_MEM]: repeated add_device (%p), increase local size "
+                "state\n",
+                ptr);
+        allocations_device_[ptr] += size;
+    } else {
+        allocations_device_.emplace(std::pair<void *, size_t>(ptr, size));
+        total_size_gpu_ += size;
 
-    BENCHDNN_PRINT(8,
-            "[CHECK_MEM]: device_malloc (%p) of size %s, device total alloc: "
-            "%s\n",
-            ptr, smart_bytes(size).c_str(),
-            smart_bytes(total_size_gpu_).c_str());
+        BENCHDNN_PRINT(8,
+                "[CHECK_MEM]: device_malloc (%p) of size %s, device total "
+                "alloc: %s\n",
+                ptr, smart_bytes(size).c_str(),
+                smart_bytes(total_size_gpu_).c_str());
+    }
 }
 
-void memory_registry_t::remove_device(void *ptr) {
+void memory_registry_t::remove_device(void *ptr, size_t size) {
     std::lock_guard<std::mutex> g(m_);
     if (!ptr) return;
 
-    if (mapped_allocations_.find(ptr) != mapped_allocations_.end()) {
+    const size_t stored_size = allocations_device_.at(ptr);
+    if (stored_size > size) {
         BENCHDNN_PRINT(8,
-                "[CHECK_MEM]: device_free (%p) attempts to free a mapped "
-                "pointer. Skip this action.\n",
+                "[CHECK_MEM]: repeated device_free (%p), decrease local size "
+                "state\n",
                 ptr);
-        return;
+        allocations_device_[ptr] -= size;
+    } else {
+        // See `add_device` comment. Because of that, extra allocations in CPU
+        // SYCL scenario are handled by `if` branch, but skipping action must be
+        // done for non SYCL CPU backend.
+        const bool is_cpu_sycl = DNNL_CPU_RUNTIME == DNNL_RUNTIME_SYCL;
+        if (!is_cpu_sycl
+                && mapped_allocations_.find(ptr) != mapped_allocations_.end()) {
+            BENCHDNN_PRINT(8,
+                    "[CHECK_MEM]: device_free (%p) attempts to free a mapped "
+                    "pointer. Skip this action.\n",
+                    ptr);
+            return;
+        }
+
+        allocations_device_.erase(ptr);
+        total_size_gpu_ -= size;
+
+        BENCHDNN_PRINT(8,
+                "[CHECK_MEM]: device_free (%p) of size %s, device total alloc: "
+                "%s\n",
+                ptr, smart_bytes(size).c_str(),
+                smart_bytes(total_size_gpu_).c_str());
     }
-
-    // Use `at` to catch cases when unallocated pointers are removed.
-    const size_t size = allocations_device_.at(ptr);
-    total_size_gpu_ -= size;
-
-    BENCHDNN_PRINT(8,
-            "[CHECK_MEM]: device_free (%p) of size %s, device total alloc: "
-            "%s\n",
-            ptr, smart_bytes(size).c_str(),
-            smart_bytes(total_size_gpu_).c_str());
-    allocations_device_.erase(ptr);
 }
 
 void memory_registry_t::set_expected_max(size_t size) {
+    std::lock_guard<std::mutex> g(m_);
     expected_max_ = static_cast<size_t>(expected_trh_ * size);
     has_warned_ = false;
     warn_size_check();

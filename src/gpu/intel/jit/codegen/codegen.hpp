@@ -16,9 +16,7 @@
 #ifndef GPU_INTEL_JIT_CODEGEN_CODEGEN_HPP
 #define GPU_INTEL_JIT_CODEGEN_CODEGEN_HPP
 
-#include "gpu/intel/jit/ir/core.hpp"
-#include "gpu/intel/jit/ir/hw.hpp"
-#include "gpu/intel/jit/ir/kernel_info.hpp"
+#include "gpu/intel/jit/ir/include/kernel.hpp"
 #include "oneapi/dnnl/dnnl_config.h"
 
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL
@@ -35,13 +33,13 @@ namespace intel {
 namespace jit {
 
 #ifdef WITH_SYCL_RUNTIME
-::sycl::kernel make_kernel(const kernel_iface_t &iface, const stmt_t &body,
-        const exec_config_t &exec_cfg, const ngen::DebugConfig &debug_cfg,
+::sycl::kernel make_kernel(const kernel::iface_t &iface, const stmt_t &body,
+        const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
         ::sycl::context ctx, ::sycl::device dev);
 #endif
 #ifdef WITH_OPENCL_RUNTIME
-cl_kernel make_kernel(const kernel_iface_t &iface, const stmt_t &body,
-        const exec_config_t &exec_cfg, const ngen::DebugConfig &debug_cfg,
+cl_kernel make_kernel(const kernel::iface_t &iface, const stmt_t &body,
+        const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
         cl_context ctx, cl_device_id dev);
 #endif
 

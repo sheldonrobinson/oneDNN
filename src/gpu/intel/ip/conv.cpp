@@ -86,10 +86,10 @@ status_t conv_fwd_t::pd_t::init_conf(impl::engine_t *engine) {
     primitive_desc_iterator_t it(engine, (op_desc_t *)&cd, &conv_attr, nullptr);
     if (!it.is_initialized()) return status::out_of_memory;
     cpd_ = *(++it);
-    if (!cpd_) return status::unimplemented;
+    VDISPATCH_INNER_PRODUCT_IC(cpd_, VERBOSE_NULL_ARG);
     std::string impl_name(cpd_->name());
-    if (impl_name.find("ref") != std::string::npos)
-        return status::unimplemented;
+    VDISPATCH_INNER_PRODUCT_IC(impl_name.find("ref") == std::string::npos,
+            "not a reference implementation");
 
     auto src_conv = *cpd_->src_md();
     auto wei_conv = *cpd_->weights_md();
@@ -127,11 +127,10 @@ status_t conv_fwd_t::pd_t::init_conf(impl::engine_t *engine) {
 
     memory_desc_wrapper src_d(src_md_);
     memory_desc_wrapper dst_d(dst_md_);
-    if (conv_src_md.format_desc.blocking.inner_nblks < 2
+    const bool prob_ok = !(conv_src_md.format_desc.blocking.inner_nblks < 2
             && conv_wei_md.format_desc.blocking.inner_nblks < 2
-            && src_d.size() + dst_d.size() >= 20000000)
-        return status::unimplemented;
-
+            && src_d.size() + dst_d.size() >= 20000000);
+    VDISPATCH_INNER_PRODUCT_IC(prob_ok, "bad md blocking configuration");
     return status::success;
 }
 
@@ -169,9 +168,11 @@ status_t conv_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         r_args[DNNL_ARG_FROM] = memory_arg_t {in, true};
         r_args[DNNL_ARG_TO] = memory_arg_t {out, false};
         exec_ctx_t r_ctx(ctx, std::move(r_args));
-        nested_scratchpad_t ns(
-                ctx, memory_tracking::names::key_nested_multiple + r_num, prim);
-        r_ctx.set_scratchpad_grantor(ns.grantor());
+        auto *nested_grantor
+                = create_nested_grantor(ctx.get_scratchpad_grantor(),
+                        memory_tracking::names::key_nested_multiple + r_num,
+                        prim->pd()->scratchpad_registry());
+        r_ctx.set_scratchpad_grantor(nested_grantor);
         return prim->execute(r_ctx);
     };
     if (conf.reorder_dst) {
@@ -210,9 +211,10 @@ status_t conv_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     }
 
     exec_ctx_t c_ctx(ctx, std::move(c_args));
-    nested_scratchpad_t ns(
-            ctx, memory_tracking::names::key_nested_multiple, conv_);
-    c_ctx.set_scratchpad_grantor(ns.grantor());
+    auto *nested_grantor = create_nested_grantor(ctx.get_scratchpad_grantor(),
+            memory_tracking::names::key_nested_multiple,
+            conv_->pd()->scratchpad_registry());
+    c_ctx.set_scratchpad_grantor(nested_grantor);
     CHECK(conv_->execute(c_ctx));
 
     if (conf.reorder_dst) {

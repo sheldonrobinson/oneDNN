@@ -239,7 +239,7 @@ status_t acl_lowp_matmul_t::pd_t::init_scratchpad(
         memory_tracking::registrar_t &scratchpad,
         const arm_compute::experimental::MemoryRequirements &aux_mem_req) {
 
-    if (aux_mem_req.size() != 0) {
+    if (!aux_mem_req.empty()) {
         for (size_t id = 0; id < lowp_matmul_keys.size(); id++) {
             if (aux_mem_req[id].size > 0) {
                 scratchpad.book(lowp_matmul_keys[id], aux_mem_req[id].size, 1,
@@ -297,7 +297,7 @@ status_t acl_lowp_matmul_t::init(engine_t *engine) {
 
 status_t acl_lowp_matmul_t::execute(const exec_ctx_t &ctx) const {
     std::lock_guard<std::mutex> _lock {this->mtx_};
-    const auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     auto alcm = pd()->almc_;
     bool with_bias = pd()->almc_.with_bias;

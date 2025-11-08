@@ -756,13 +756,13 @@ status_t simple_common_t<aprop>::pd_t::init(impl::engine_t *engine) {
         attr.deterministic_ = this->attr()->deterministic_;
         CHECK(dnnl::impl::create_gemm_pd(gemm_pd, engine, &a_md, &b_md, &c_md,
                 &glob_zero_md, c_dt, &attr));
-        if (threads_per_eu == 0)
-            CHECK(gemm_pd->query(
-                    query::preferred_gpu_threads_per_eu, 0, &threads_per_eu));
-        else if (get_verbose_dev_mode(verbose_t::debuginfo) > 1) {
+        bool verbose = get_verbose_dev_mode(verbose_t::debuginfo) > 1;
+        if (threads_per_eu == 0 || verbose) {
             auto t = 0;
-            CHECK(gemm_pd->query(query::preferred_gpu_threads_per_eu, 0, &t));
-            if (t != threads_per_eu)
+            auto s = gemm_pd->query(query::preferred_gpu_threads_per_eu, 0, &t);
+            if (threads_per_eu == 0)
+                threads_per_eu = (status::success != s) ? t : 128;
+            if (verbose && t != threads_per_eu)
                 verbose_printf("[WARNING] GEMM grf modes are inconsistent\n");
         }
         return status::success;
@@ -1077,11 +1077,12 @@ gemm_sig((simple_common_t<aprop>::gemm_primitive)) {
 
     auto gemm_ctx = gemm::exec_ctx_t(ctx, gemm_args);
 
-    std::unique_ptr<nested_scratchpad_t> ns;
     const auto init_gemm_nested_scratchpad
             = [&](const std::shared_ptr<impl::primitive_t> &gemm, int key) {
-                  ns = utils::make_unique<nested_scratchpad_t>(ctx, key, gemm);
-                  gemm_ctx.set_scratchpad_grantor(ns->grantor());
+                  auto *nested_grantor
+                          = create_nested_grantor(ctx.get_scratchpad_grantor(),
+                                  key, gemm->pd()->scratchpad_registry());
+                  gemm_ctx.set_scratchpad_grantor(nested_grantor);
               };
 
     switch (gemm_kind) {
@@ -1604,8 +1605,8 @@ status_t simple_common_t<aprop>::execute_(const exec_ctx_t &ctx) const {
     bool is_lr = !one_of(conf.exec_dir, r2l, r2l);
     bool is_rl = !one_of(conf.exec_dir, l2r, l2r);
 
-    const memory_storage_t *scales_buf = nullptr;
-    if (pd()->conf.is_int8 && pd()->conf.copy_bias) {
+    const memory_storage_t *scales_buf = &memory_storage_t::empty_storage();
+    if (conf.is_int8 && conf.copy_bias) {
         scales_buf = &CTX_GPU_RES_STORAGE(SCALES_);
     }
 

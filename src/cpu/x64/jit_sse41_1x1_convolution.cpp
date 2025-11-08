@@ -45,13 +45,13 @@ void jit_sse41_1x1_convolution_fwd_t::execute_forward(
             const data_t *, DNNL_ARG_ATTR_POST_OP_DW | DNNL_ARG_BIAS);
     const auto post_ops_binary_rhs_arg_vec
             = binary_injector::prepare_binary_args(pd()->jcp_.post_ops, ctx);
-    const auto post_ops_binary_rhs_arg_vec_dw = pd()->dw_conv_pd_ != nullptr
+    const auto &post_ops_binary_rhs_arg_vec_dw = pd()->dw_conv_pd_ != nullptr
             ? binary_injector::prepare_binary_args(
                     pd()->dw_conv_pd_->jcp_.post_ops, ctx,
                     pd()->jcp_.post_ops.entry_.size() + 1)
             : std::vector<const void *> {};
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
     parallel(kernel_->jcp.nthr, [&](const int ithr, const int nthr) {
         execute_forward_thr(ithr, nthr, src, weights, bias, weights_dw, bias_dw,
                 dst, scratchpad, post_ops_binary_rhs_arg_vec.data(),

@@ -249,11 +249,12 @@ struct cpu_isa_traits_t {}; /* ::vlen -> 32 (for avx2) */
 // pack struct so it can fit into a single 64-byte cache line
 #pragma pack(push, 1)
 struct palette_config_t {
+    static constexpr int max_size = 16;
     uint8_t palette_id;
     uint8_t startRow;
     uint8_t reserved[14];
-    uint16_t cols[16];
-    uint8_t rows[16];
+    uint16_t cols[max_size];
+    uint8_t rows[max_size];
 };
 #pragma pack(pop)
 
@@ -380,6 +381,13 @@ int get_max_column_bytes(int palette);
 int get_max_rows(int palette);
 bool DNNL_API is_available();
 
+// Helper function to get the maximum safe palette size for bounds checking
+inline int get_max_palette_size() {
+    const int max_tiles = get_max_tiles(get_target_palette());
+    constexpr int max_palette_size = palette_config_t::max_size;
+    return nstl::min(max_tiles, max_palette_size);
+}
+
 } // namespace amx
 
 namespace {
@@ -475,6 +483,11 @@ inline bool isa_has_s8s8(cpu_isa_t isa) {
 
 inline bool isa_has_bf16(cpu_isa_t isa) {
     return is_superset(isa, avx512_core_bf16);
+}
+
+inline bool isa_has_f16(cpu_isa_t isa) {
+    return is_superset(isa, avx512_core_fp16)
+            || is_superset(isa, avx10_1_512_amx_fp16);
 }
 
 inline bool isa_has_masks(cpu_isa_t isa) {
@@ -577,25 +590,6 @@ inline size_t data_type_vnni_granularity(const data_type_t data_type) {
         default: assert(!"unknown data_type");
     }
     return size_t(0); /* should not be reachable */
-}
-
-inline size_t data_type_vnni_simd_elems(data_type_t data_type, cpu_isa_t isa) {
-    const size_t dt_size = types::data_type_size(data_type);
-    assert(dt_size > 0);
-    if (isa == avx2_vnni_2
-            && utils::one_of(data_type, data_type::f16, data_type::bf16))
-        // for xf16 avx2_vnni_2, we use same blocking as avx512_core_bf16 due
-        // to use of even-odd pair of cvt instructions.
-        return data_type_vnni_simd_elems(data_type::bf16, avx512_core_bf16);
-
-    // Note: Currently, int8 matmul has avx512_core hardcoded.
-    // TODO: Investigate and remove if possible.
-    if (data_type == data_type::s8 && isa != avx512_core)
-        return data_type_vnni_simd_elems(data_type, avx512_core);
-
-    size_t vlen = isa_max_vlen(isa);
-    assert(vlen >= dt_size);
-    return vlen / dt_size;
 }
 
 } // namespace x64

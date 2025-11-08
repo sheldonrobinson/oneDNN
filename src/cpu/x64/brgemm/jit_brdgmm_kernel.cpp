@@ -102,6 +102,7 @@ void jit_brdgmm_kernel_base_t<Wmm>::read_params() {
 
     mov(reg_BS, ptr[param1 + GET_OFF(BS)]);
     mov(reg_aux_C, ptr[param1 + GET_OFF(ptr_C)]);
+    reg_aux_C.save();
     mov(reg_aux_D, ptr[param1 + GET_OFF(ptr_D)]);
 
     if (brg.type == brgemm_offs) {
@@ -313,9 +314,9 @@ void jit_brdgmm_kernel_base_t<Wmm>::apply_post_ops(
         const bool p_sum_zp_reg_set = *p_sum_zp != 0;
 
         const reg64_savable_guard_t register_guard_sum(
-                {{{reg_ptr_sum_scale},
+                {{{&reg_ptr_sum_scale},
                          with_binary_non_scalar_bcast_ && p_sum_scale_reg_set},
-                        {{reg_ptr_sum_zp}, p_sum_zp_reg_set}});
+                        {{&reg_ptr_sum_zp}, p_sum_zp_reg_set}});
 
         if (p_sum_scale_reg_set)
             mov(reg_ptr_sum_scale, reinterpret_cast<size_t>(p_sum_scale));
@@ -540,8 +541,8 @@ void jit_brdgmm_kernel_base_t<Wmm>::store_accumulators_apply_post_ops(
 
     for (int m = 0; m < m_blocks; m++) {
         auto vmm_lbound = vmm_tmp(0);
-        auto vmm_ubound = vmm_tmp(1);
         if (dt_requires_saturation) {
+            auto vmm_ubound = vmm_tmp(1);
             for_(int n = 0; n < n_blocks; n++)
             for (int v_i = 0; v_i < v_substep; ++v_i) {
                 if (get_substep_simd(n, v_i, has_n_tail) <= 0) continue;
@@ -565,6 +566,7 @@ void jit_brdgmm_kernel_base_t<Wmm>::store_accumulators_apply_post_ops(
             const Vmm_low_t r_vmm_low = maybe_mask(vmm_low, mask_flag, true);
             const Xmm r_xmm = maybe_mask(xmm, mask_flag, true);
             if (use_sat_cvt) {
+                auto vmm_ubound = vmm_tmp(1);
                 assert(one_of(brg.dt_d, data_type::s8, data_type::u8));
                 auto vmm_perm = Vmm(vmm_ubound.getIdx());
                 vpermb(vmm, vmm_perm, vmm);
@@ -627,6 +629,7 @@ void jit_brdgmm_kernel_base_t<Wmm>::store_accumulators_without_post_ops(
                 brg.dt_d, false, use_sat_cvt);
     }
 
+    reg_aux_C.restore();
     for_(int m = 0; m < m_blocks; m++)
     for_(int n = 0; n < n_blocks; n++)
     for (int v_i = 0; v_i < vnni_substep(); ++v_i) {
@@ -1380,7 +1383,9 @@ void jit_brdgmm_kernel_base_t<Wmm>::compute_loop() {
             if (loop_n_update_aux_ptrs) {
                 add(reg_aux_N, n_loop_step);
                 add(reg_a_offset, n_loop_step * brg.typesize_A);
+                reg_aux_C.restore();
                 add(reg_aux_C, n_loop_step * brg.typesize_C);
+                reg_aux_C.save();
                 add(reg_aux_D, n_loop_step * brg.typesize_D);
             }
 
@@ -1417,7 +1422,9 @@ void jit_brdgmm_kernel_base_t<Wmm>::compute_loop() {
                 const int n_loop_offset
                         = loop_n_update_aux_ptrs * loop_n * n_block2();
                 add(reg_a_offset, A_offset(m_blocks, -n_loop_offset));
+                reg_aux_C.restore();
                 add(reg_aux_C, C_offset(m_blocks, -n_loop_offset, 0));
+                reg_aux_C.save();
                 add(reg_aux_D, D_offset(m_blocks, -n_loop_offset, 0));
             }
 

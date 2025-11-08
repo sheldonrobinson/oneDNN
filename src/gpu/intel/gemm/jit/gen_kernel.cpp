@@ -24,10 +24,11 @@
 #include "gemmstone/strategy_parser.hpp"
 #include "gpu/intel/compute/device_info.hpp"
 #include "gpu/intel/gemm/jit/gen_kernel_db.hpp"
+#include "gpu/intel/gemm/jit/generator/pieces/compute_utils.hpp"
 #include "gpu/intel/gemm/jit/generator_dsl/builder.hpp"
 #include "gpu/intel/gemm/jit/generator_dsl/kernel_desc.hpp"
 #include "gpu/intel/jit/codegen/kernel.hpp"
-#include "gpu/intel/jit/utils/ngen_type_bridge.hpp"
+#include "gpu/intel/jit/utils/type_bridge.hpp"
 #include "gpu/intel/utils.hpp"
 #include "kernel_evaluator.hpp"
 #include "kernel_selector.hpp"
@@ -87,6 +88,16 @@ compute::scalar_type_t gen_desc_t::scalar_type() const {
         default: return compute::scalar_type_t::undef;
     }
 }
+
+#ifdef DNNL_DEV_MODE
+static gemmstone::Scalar stringToScalar(std::string val) {
+    using namespace gemmstone;
+    switch (val.c_str()[0]) {
+        case '-': return Scalar(Scalar::Variable);
+        default: return Scalar(std::stoi(val));
+    }
+}
+#endif
 
 status_t gen_desc_t::finalize(const char *tags) {
     // Update problem alignments to match catalog entry.
@@ -148,9 +159,9 @@ status_t gen_desc_t::finalize(const char *tags) {
         ss >> strategy_.unroll[LoopN];
 
         ss >> val;
-        problem_.alpha = std::stoi(val);
+        problem_.alpha = stringToScalar(val);
         ss >> val;
-        problem_.beta = std::stoi(val);
+        problem_.beta = stringToScalar(val);
 
         ovr_strategy = ss.str().substr(ss.tellg()); // remaining string
         parseStrategy(ovr_strategy.c_str(), hw_, problem_, strategy_);
@@ -181,7 +192,6 @@ status_t gen_desc_t::finalize(const char *tags) {
 #endif
     strategy_.panelCheck
             |= (isPacked(problem_.A.layout) || isPacked(problem_.B.layout));
-    adjustStrategy(hw_, problem_, strategy_, tags);
 
     if (enable_generator_dsl()) { fixup_dsl_strategy(strategy_); }
 
@@ -283,6 +293,7 @@ status_t gen_desc_t::finalize(const char *tags) {
     strategy_.systolicAvailable &= !disable_systolic_;
     if (problem_.needsAGroupSums() || problem_.needsBGroupSums())
         problem_.autoTypeConversions(hw_, strategy_.systolicAvailable);
+    adjustStrategy(hw_, problem_, strategy_, tags);
     try {
         strategy_.preflight(hw_, problem_);
     } catch (...) { return status::unimplemented; }
@@ -294,6 +305,16 @@ status_t gen_desc_t::finalize(const char *tags) {
     if (problem_.bOffset2D() || problem_.bScale2D())
         if (problem_.bqGroupK % strategy_.bqGroupKGranularity())
             return status::unimplemented;
+    if (problem_.aScale2D()
+            && problem_.aqGroupK
+                            % minOuterProductCount(hw_, problem_, strategy_)
+                    != 0)
+        return status::unimplemented;
+    if (problem_.bScale2D()
+            && problem_.bqGroupK
+                            % minOuterProductCount(hw_, problem_, strategy_)
+                    != 0)
+        return status::unimplemented;
 
     // If the M/N group size is equal to M or N, align up to a multiple of unroll size
     // XXX: Increase group size to a large value before aligning to increase reusability
@@ -400,15 +421,16 @@ status_t gen_desc_t::transfer_post_ops(
     return status::success;
 }
 
-status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
-        int stepping, int eu_count, bool has_systolic, bool is_integrated,
-        compute_mode mode, int batch_dims, bool trans_a, bool trans_b,
-        bool trans_co, bool swap_ab, const quant_params &a_quant,
-        const quant_params &b_quant, bool dst_sround, bool c_offset, bool bias,
-        sum_ab_t reduce_ab, float alpha, float beta, data_type_t a_type,
-        data_type_t b_type, data_type_t c_type, data_type_t co_type,
-        data_type_t acc_type, int align_a, int align_b, int align_c, dim_t m,
-        dim_t n, dim_t k, dim_t lda, dim_t ldb, dim_t ldc, dim_t batch,
+std::vector<const gemmstone::kcatalog::Entry *>
+gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch, int stepping,
+        int eu_count, bool has_systolic, bool is_integrated, compute_mode mode,
+        int batch_dims, bool trans_a, bool trans_b, bool trans_co, bool swap_ab,
+        const quant_params &a_quant, const quant_params &b_quant,
+        bool dst_sround, bool c_offset, bool bias, sum_ab_t reduce_ab,
+        float alpha, float beta, data_type_t a_type, data_type_t b_type,
+        data_type_t c_type, data_type_t co_type, data_type_t acc_type,
+        int align_a, int align_b, int align_c, dim_t m, dim_t n, dim_t k,
+        dim_t lda, dim_t ldb, dim_t ldc, dim_t batch,
         gpu_post_ops_t &&post_ops) {
     using namespace ngen;
     using namespace kcatalog;
@@ -533,7 +555,8 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
     if (beta == 0.0f || beta == 1.0f) problem_.beta = beta;
 
     auto status = transfer_post_ops(std::move(post_ops), swap_ab);
-    if (status != status::success) return status;
+    if (status != status::success)
+        return std::vector<const gemmstone::kcatalog::Entry *>();
 
     if (c_offset || bias || reduce_ab != sum_ab::sum_none) {
         assert(!(c_offset && bias));
@@ -633,24 +656,25 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
     bool fpmath_bf16 = mode & mode_bf16x1;
     bool fpmath_f16 = mode & mode_f16x1;
 
+    auto add_matches = [&](MatchParams start, const char *(*match)(Type)) {
+        if (match(problem_.Ta_ext)) {
+            match_params.push_back(start);
+            match_params.back().selector.precisions[0] = match(problem_.Ta_ext);
+        }
+        if (match(problem_.Tb_ext)) {
+            match_params.push_back(start);
+            match_params.back().selector.precisions[1] = match(problem_.Tb_ext);
+        }
+        if (match(problem_.Ta_ext) && match(problem_.Tb_ext)) {
+            match_params.push_back(start);
+            match_params.back().selector.precisions[0] = match(problem_.Ta_ext);
+            match_params.back().selector.precisions[1] = match(problem_.Tb_ext);
+        }
+    };
+
     auto add_mode_matches = [&](bool has_mode, const char *(*match)(Type)) {
         if (!has_mode) return;
-        auto &def = base.selector.precisions;
-        if (match(problem_.Ta)) {
-            match_params.push_back(base);
-            match_params.back().selector.precisions[0] = match(problem_.Ta);
-            match_params.back().selector.precisions[1] = def[1];
-        }
-        if (match(problem_.Tb)) {
-            match_params.push_back(base);
-            match_params.back().selector.precisions[0] = def[0];
-            match_params.back().selector.precisions[1] = match(problem_.Tb);
-        }
-        if (match(problem_.Ta) && match(problem_.Tb)) {
-            match_params.push_back(base);
-            match_params.back().selector.precisions[0] = match(problem_.Ta);
-            match_params.back().selector.precisions[1] = match(problem_.Tb);
-        }
+        add_matches(base, match);
     };
 
     add_mode_matches(fpmath_tf32, [](Type dt) -> const char * {
@@ -677,8 +701,18 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
         return nullptr;
     });
 
-    add_mode_matches(true, [](Type dt) -> const char * {
-        if (dt.isF4()) return "E";
+    // Add allowed variants of each valid kernel.
+    // Should be used after all valid kernels are added to match_params
+    auto add_variants = [&](const char *(*match)(Type)) {
+        size_t npatterns = match_params.size();
+        for (size_t i = 0; i < npatterns; i++) {
+            add_matches(match_params[i], match);
+        }
+    };
+
+    add_variants([](Type dt) -> const char * {
+        // fp16 -> bf16
+        if (dt == Type::bf16) return "H";
         return nullptr;
     });
 
@@ -693,47 +727,62 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
         match_params.back().selector.precisions[2] = "I";
     }
 
-    EvaluateParams eval_params;
-
-    eval_params.sizes = base.sizes;
-    eval_params.alpha = alpha;
-    eval_params.beta = beta;
-    eval_params.postOps = !problem_.postOps.empty();
-    eval_params.cConvert = (acc_type != c_type);
-    eval_params.euCount = eu_count;
-    eval_params.batch = (batch_dims > 0);
-    eval_params.deterministic = (mode & mode_deterministic);
+    eval_params_.sizes = base.sizes;
+    eval_params_.alpha = alpha;
+    eval_params_.beta = beta;
+    eval_params_.postOps = !problem_.postOps.empty();
+    eval_params_.cConvert = (acc_type != c_type);
+    eval_params_.euCount = eu_count;
+    eval_params_.batch = (batch_dims > 0);
+    eval_params_.deterministic = (mode & mode_deterministic);
 
     SelectionObserver observer = entryObserver;
-    entry_ = select(catalog(), static_cast<int>(match_params.size()),
-            match_params.data(), eval_params, aux_params_, &observer);
+    tags_ = match_params[0].tags;
+    Ts_ = problem_.Ts;
+    beta_ = problem_.beta;
+    return select(catalog(), static_cast<int>(match_params.size()),
+            match_params.data(), eval_params_, aux_params_, &observer);
+}
 
-    if (!entry_) return status::unimplemented;
-
+status_t gen_nocopy_desc_t::finalize() {
     // Update A/B/C types from entry.
     Type Ta_new, Ta_ext_new, Tb_new, Tb_ext_new, Tc_new;
     parsePrecisions(entry_->selector.precisions[0], Ta_ext_new, Ta_new);
     parsePrecisions(entry_->selector.precisions[1], Tb_ext_new, Tb_new);
     Tc_new = charToType(entry_->selector.precisions[2][0]);
 
-    auto update_type = [](Type &T, Type T_new, bool sz_change = false) {
-        if ((T.bits() != T_new.bits()) && !sz_change) return;
+    auto update_type = [](Type &T, Type T_new) {
         if (T.isF8() && T_new.isF8()) return;
+        if (T.isFP() && T.bits() == 16 && T_new.isFP() && T_new.bits() == 16)
+            return;
         if (T.isF4() && (T_new.isF4() || T_new.isInt4())) return;
         T = T.isSigned() ? T_new.asSigned() : T_new.asUnsigned();
     };
-    update_type(problem_.Ta, Ta_new, true);
-    update_type(problem_.Tb, Tb_new, true);
-    update_type(problem_.Tc, Tc_new, true);
-    update_type(problem_.Ta_ext, Ta_ext_new);
-    update_type(problem_.Tb_ext, Tb_ext_new);
+    update_type(problem_.Ta, Ta_new);
+    update_type(problem_.Tb, Tb_new);
+    update_type(problem_.Tc, Tc_new);
+
+    // If the kernel uses tf32 types, interpret the buffer as tf32 without
+    // converting from fp32. This eliminates a rounding step, but improves performance
+    auto use_tf32 = [](Type &T, const Type &newT) {
+        if (newT == Type::tf32) {
+            gpu_assert(T == Type::f32)
+                    << "Unexpected use of tf32 for non-fp32 type";
+            T = Type::tf32;
+        }
+    };
+    use_tf32(problem_.Ta_ext, Ta_ext_new);
+    use_tf32(problem_.Tb_ext, Tb_ext_new);
+    problem_.Ts = Ts_;
 
     if (problem_.Ts == Type::invalid) problem_.Ts = problem_.Tc;
 
     auto block_k = entry_->driverInfo.blocking[LoopK];
-    if (block_k > 0 && k > block_k && beta != 1.0f) problem_.beta = Scalar();
-
-    return finalize(match_params[0].tags);
+    problem_.beta = beta_;
+    if (block_k > 0 && k_ > block_k && eval_params_.beta != 1.0f)
+        problem_.beta = Scalar();
+    evaluate(*entry_, eval_params_, aux_params_);
+    return gen_desc_t::finalize(tags_.c_str());
 }
 
 status_t gen_xe_systolic_kernel_desc_t::select_kernel(compute::gpu_arch_t arch,
@@ -855,11 +904,12 @@ status_t gen_xe_systolic_kernel_desc_t::select_kernel(compute::gpu_arch_t arch,
     eval_params.batch = (batch_dims > 0);
 
     SelectionObserver observer = entryObserver;
-    entry_ = select(
+
+    auto entries = select(
             catalog(), match_params, eval_params, aux_params_, &observer);
 
-    if (!entry_) return status::unimplemented;
-
+    if (entries.size() < 1) return status::unimplemented;
+    entry_ = entries[0];
     return finalize(match_params.tags);
 }
 
@@ -1007,6 +1057,14 @@ void gen_kernel_t::init_interface() {
                 interface_.newArgument(
                         "offset_stride_B" + std::to_string(i), DataType::d);
             }
+            if (problem.needsAGroupSums()) {
+                interface_.newArgument(
+                        "group_sums_stride_A" + std::to_string(i), DataType::d);
+            }
+            if (problem.needsBGroupSums()) {
+                interface_.newArgument(
+                        "group_sums_stride_B" + std::to_string(i), DataType::d);
+            }
         }
         for (size_t i = 0; i < problem.postOps.len(); i++) {
             if (problem.postOps[i].is_binary()
@@ -1081,8 +1139,18 @@ dsl::kernel_t get_dsl_kernel(const GEMMProblem &problem,
         if (k != -1)
             cset.add_constraint(gemm_desc.kernel_iface().find_arg("k") == k);
     }
-    return make_kernel(gemm_desc, cset);
+    return make_kernel(gemm_desc, std::move(cset));
 };
+
+std::string dump_kernel(ngen::HW hw, const gemmstone::GEMMProblem &problem,
+        const gemmstone::GEMMStrategy &strategy) {
+    auto pstr = problem.toString();
+    auto astr = problem.scalarsToString();
+    auto sstr = unparseStrategy(hw, problem, strategy);
+    if (!astr.empty()) astr += ' ';
+    return pstr + ' ' + std::to_string(strategy.unroll[LoopM]) + ' '
+            + std::to_string(strategy.unroll[LoopN]) + ' ' + astr + sstr;
+}
 
 status_t gen_kernel_t::get_kernel(
         compute::kernel_t &kernel, const intel::engine_t *engine) {
@@ -1091,7 +1159,8 @@ status_t gen_kernel_t::get_kernel(
 
     if (enable_generator_dsl()) {
         auto k = get_dsl_kernel(*desc()->problem(), *desc()->strategy(),
-                interface_, hw_t(engine), desc()->m_, desc()->n_, desc()->k_);
+                interface_, make_ir_hw(engine), desc()->m_, desc()->n_,
+                desc()->k_);
         if (k.body.is_empty()) return status::runtime_error;
         return engine->create_kernel(kernel, k);
     }
@@ -1115,6 +1184,11 @@ status_t gen_kernel_t::get_kernel(
             REG_XE3_ISA(ARCH_DISPATCH(Xe3))
             default: assert(!"Unsupported architecture"); break;
         }
+    } catch (const ngen::out_of_registers_exception &err) {
+        // OOR is not an unrecoverable error, so let's not scare the user
+        VDEBUGINFO(1, primitive, gpu, "%s,%s,%s", "jit::gemm", err.what(),
+                dump_kernel(desc()->hw_, desc()->problem_, desc()->strategy_)
+                        .c_str());
     } catch (const std::runtime_error &err) {
         VERROR(primitive, gpu, "%s,%s", "jit::gemm", err.what());
     }
@@ -1127,22 +1201,13 @@ void gen_kernel_t::maybe_print_verbose() {
     int level = get_verbose(verbose_t::debuginfo);
     if (level < 2) return;
 
-    const auto &problem = desc()->problem_;
-    const auto &strategy = desc()->strategy_;
-
-    auto pstr = problem.toString();
-    auto astr = problem.scalarsToString();
-    auto sstr = unparseStrategy(desc()->hw_, problem, strategy);
-
-    if (!astr.empty()) astr += ' ';
-
     if (level >= 10)
         verbose_printf("info,gpu,gemm,catalog entry:%s\n",
                 desc()->entry().str().c_str());
 
-    verbose_printf("info,gpu,gemm,kernel:%s %d %d %s%s\n", pstr.c_str(),
-            strategy.unroll[LoopM], strategy.unroll[LoopN], astr.c_str(),
-            sstr.c_str());
+    verbose_printf("info,gpu,gemm,kernel:%s\n",
+            dump_kernel(desc()->hw_, desc()->problem_, desc()->strategy_)
+                    .c_str());
 }
 
 } // namespace jit

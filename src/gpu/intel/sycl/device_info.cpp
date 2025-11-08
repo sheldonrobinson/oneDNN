@@ -102,7 +102,7 @@ status_t device_info_t::init_extensions(impl::engine_t *engine) {
     for (uint64_t i_ext = 1; i_ext < (uint64_t)device_ext_t::last;
             i_ext <<= 1) {
         const char *s_ext = ext2cl_str((device_ext_t)i_ext);
-        if (device.ext_oneapi_supports_cl_extension(s_ext)) {
+        if (s_ext && device.ext_oneapi_supports_cl_extension(s_ext)) {
             extensions_ |= i_ext;
         }
     }
@@ -131,16 +131,8 @@ status_t device_info_t::init_attributes(impl::engine_t *engine) {
             CHECK(gpu::intel::ocl::get_ocl_device_eu_count(
                     ocl_dev, gpu_arch_, &eu_count_));
         } else {
-            auto slices = device.get_info<
-                    xpu::sycl::compat::ext_intel_gpu_slices>();
-            auto sub_slices = device.get_info<
-                    xpu::sycl::compat::ext_intel_gpu_subslices_per_slice>();
-            auto eus_per_subslice = device.get_info<::sycl::info::device::
-                            ext_intel_gpu_eu_count_per_subslice>();
-            if (gpu_arch_ == gpu::intel::compute::gpu_arch_t::xe2)
-                eus_per_subslice
-                        = 8; /* override incorrect driver information */
-            eu_count_ = slices * sub_slices * eus_per_subslice;
+            eu_count_ = device.get_info<
+                    ::sycl::info::device::max_compute_units>();
         }
     } else {
         eu_count_ = device.get_info<::sycl::info::device::max_compute_units>();
@@ -150,6 +142,8 @@ status_t device_info_t::init_attributes(impl::engine_t *engine) {
             = device.get_info<::sycl::info::device::global_mem_cache_size>();
     mayiuse_system_memory_allocators_
             = device.has(::sycl::aspect::usm_system_allocations);
+    max_allocation_size_
+            = device.get_info<::sycl::info::device::max_mem_alloc_size>();
     return status::success;
 }
 

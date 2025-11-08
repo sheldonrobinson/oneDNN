@@ -73,8 +73,8 @@ pvar_t prb_stride(const pvar_t &dim, tensor_kind_t tensor_kind) {
     auto dims = layout_dims(tensor_kind, true);
     for (auto &d : dims) {
         if (d == dim) {
-            auto str = to_string(tensor_kind) + "_";
-            return pvar_t(str + dim.str() + "_stride");
+            auto prefix = to_string(tensor_kind)[0] + std::string("_");
+            return pvar_t(prefix + dim.str() + "_s");
         }
     }
     return pvar_t();
@@ -289,20 +289,20 @@ status_t problem_t::init_abc_data_types(const hw_t &hw) {
         if (use_matching_fpmath
                 && attr->mayiconvert(data_type::f32, data_type::bf16)
                 && get_supported_fma_kind(
-                           hw, data_type::bf16, data_type::bf16, data_type::f32)
+                           hw, type_t::bf16(), type_t::bf16(), type_t::f32())
                         != fma_kind_t::undef) {
             a_data_type = data_type::bf16;
             b_data_type = data_type::bf16;
         } else if (use_matching_fpmath
                 && attr->mayiconvert(data_type::f32, data_type::f16)
                 && get_supported_fma_kind(
-                           hw, data_type::f16, data_type::f16, data_type::f32)
+                           hw, type_t::f16(), type_t::f16(), type_t::f32())
                         != fma_kind_t::undef) {
             a_data_type = data_type::f16;
             b_data_type = data_type::f16;
         } else if (attr->mayiconvert(data_type::f32, data_type::tf32)
                 && get_supported_fma_kind(
-                           hw, data_type::tf32, data_type::tf32, data_type::f32)
+                           hw, type_t::tf32(), type_t::tf32(), type_t::f32())
                         != fma_kind_t::undef) {
             a_data_type = data_type::tf32;
             b_data_type = data_type::tf32;
@@ -358,9 +358,9 @@ void problem_t::init_transpose(const hw_t &hw) {
     if (is_fwd) ab_swap_transpose &= allow_fwd;
     if (is_bwd_d) ab_swap_transpose &= allow_bwd_d;
     if (is_bwd_w) ab_swap_transpose &= allow_bwd_w;
-    if (is_fwd && is_nchw_ok(*this, hw.to_ngen(), tensor_kind_t::src))
+    if (is_fwd && is_nchw_ok(*this, hw, tensor_kind_t::src))
         ab_swap_transpose = true;
-    if (is_bwd_d && is_nchw_ok(*this, hw.to_ngen(), tensor_kind_t::dst))
+    if (is_bwd_d && is_nchw_ok(*this, hw, tensor_kind_t::dst))
         ab_swap_transpose = true;
     ab_swap_transpose
             = gpu_utils::dev_getenv("ab_swap_transpose", ab_swap_transpose);

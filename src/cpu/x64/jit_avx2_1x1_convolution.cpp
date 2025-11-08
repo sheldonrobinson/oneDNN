@@ -50,12 +50,12 @@ void jit_avx2_1x1_convolution_fwd_t::execute_forward(
             const data_t *, DNNL_ARG_ATTR_POST_OP_DW | DNNL_ARG_BIAS);
     const auto post_ops_binary_rhs_arg_vec
             = binary_injector::prepare_binary_args(pd()->jcp_.post_ops, ctx);
-    const auto post_ops_binary_rhs_arg_vec_dw = pd()->jcp_dw_
+    const auto &post_ops_binary_rhs_arg_vec_dw = pd()->jcp_dw_
             ? binary_injector::prepare_binary_args(pd()->jcp_dw_->post_ops, ctx,
                     pd()->jcp_.post_ops.entry_.size() + 1)
             : std::vector<const void *> {};
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     const auto &jcp = kernel_->jcp;
     // TODO (Roma): remove this restriction
@@ -520,7 +520,7 @@ void jit_avx2_1x1_convolution_bwd_weights_t::execute_backward_weights(
     auto diff_weights = CTX_OUT_MEM(data_t *, DNNL_ARG_DIFF_WEIGHTS);
     auto diff_bias_in = CTX_OUT_MEM(data_t *, DNNL_ARG_DIFF_BIAS);
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     const memory_desc_wrapper diff_dst_d(pd()->diff_dst_md());
     const memory_desc_wrapper src_d(pd()->src_md());
@@ -539,13 +539,13 @@ void jit_avx2_1x1_convolution_bwd_weights_t::execute_backward_weights(
             ? scratchpad.get<data_t>(key_conv_padded_bias)
             : diff_bias_in;
 
-    auto reducer_bia_scratchpad
-            = memory_tracking::grantor_t(scratchpad, prefix_reducer_bia);
+    memory_tracking::grantor_t reducer_bia_scratchpad(
+            scratchpad, prefix_reducer_bia);
     auto rb = this->reducer_bias_.get();
     rb->init(reducer_bia_scratchpad);
 
-    auto reducer_wei_scratchpad
-            = memory_tracking::grantor_t(scratchpad, prefix_reducer_wei);
+    memory_tracking::grantor_t reducer_wei_scratchpad(
+            scratchpad, prefix_reducer_wei);
     auto rw = this->reducer_weights_.get();
     rw->init(reducer_wei_scratchpad);
 

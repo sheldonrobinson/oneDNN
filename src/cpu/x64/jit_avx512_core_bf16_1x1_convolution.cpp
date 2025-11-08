@@ -75,12 +75,12 @@ void jit_avx512_core_bf16_1x1_convolution_fwd_t<dst_type>::execute_forward(
             const dw_wei_data_t *, DNNL_ARG_ATTR_POST_OP_DW | DNNL_ARG_WEIGHTS);
     const auto post_ops_binary_rhs_arg_vec
             = binary_injector::prepare_binary_args(pd()->jcp_.post_ops, ctx);
-    const auto post_ops_binary_rhs_arg_vec_dw = pd()->jcp_dw_ != nullptr
+    const auto &post_ops_binary_rhs_arg_vec_dw = pd()->jcp_dw_ != nullptr
             ? binary_injector::prepare_binary_args(pd()->jcp_dw_->post_ops, ctx,
                     pd()->jcp_.post_ops.entry_.size() + 1)
             : std::vector<const void *> {};
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     const auto &jcp = kernel_->jcp;
     if (pd()->wants_padded_bias()) {
@@ -464,7 +464,7 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
     auto diff_dst = CTX_IN_MEM(const diff_dst_data_t *, DNNL_ARG_DIFF_DST);
     auto weights = CTX_IN_MEM(const wei_data_t *, DNNL_ARG_WEIGHTS);
     auto diff_src = CTX_OUT_MEM(diff_src_data_t *, DNNL_ARG_DIFF_SRC);
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
     const auto &jcp = kernel_->jcp;
     parallel(jcp.nthr, [&](const int ithr, const int nthr) {
         assert(nthr == jcp.nthr);
@@ -676,7 +676,7 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<diff_weights_type>::
     auto src = CTX_IN_MEM(const src_data_t *, DNNL_ARG_SRC);
     auto diff_weights = CTX_OUT_MEM(diff_wei_data_t *, DNNL_ARG_DIFF_WEIGHTS);
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
     const auto &jcp = pd()->jcp_;
 
     float *diff_bias = nullptr;

@@ -389,13 +389,20 @@ int execute_and_wait(perf_function_t &exec_func, const dnnl_engine_t &engine,
                 {sycl::ext::oneapi::experimental::property::graph::
                                 assume_buffer_outlives_graph {}}};
 
-        graph.begin_recording(queue);
-        status = exec_func(stream, dnnl_args);
-        graph.end_recording(queue);
-        DNN_SAFE(dnnl_stream_wait(stream), CRIT);
+        try {
+            graph.begin_recording(queue);
+            status = exec_func(stream, dnnl_args);
+            graph.end_recording(queue);
+            DNN_SAFE(dnnl_stream_wait(stream), CRIT);
 
-        auto exec = graph.finalize();
-        queue.ext_oneapi_graph(exec).wait();
+            auto exec = graph.finalize();
+            queue.ext_oneapi_graph(exec).wait();
+        } catch (const sycl::exception &e) {
+            BENCHDNN_PRINT(0, "%s %s\n",
+                    "[ERROR] SYCL graph execution exception:", e.what());
+            if (res) res->state = FAILED;
+            return FAIL;
+        }
 
         // SYCL graph feature completed submission and execution, no need to
         // have a regular run.
@@ -1321,12 +1328,20 @@ void add_md_size(const_dnnl_memory_desc_t md,
     check_mem_size_args.total_size_device += mem_size;
 
     // GPU mapped memory factor.
-    // All memory is mapped once it is created and unmapped only before
-    // primitive execution. Device memory requires additional buffer for mapped
-    // memory allocated on host (CPU).
+    // All memory is mapped once it is created and unmapped only for primitive
+    // execution mapped back again right after. Device memory requires
+    // additional buffer for mapped memory allocated on host (CPU).
+    //
     // Note: When oneDNN uses USM shared memory on an iGPU, additional buffers
     // are not required, so map factor could be equal to 0. This is not
     // accounted for to maintain simplicity.
+    //
+    // This might be improved by switching to lazy mapping when it happens upon
+    // direct data accessing and unmapping right after the access completed.
+    // In such case it requires only the biggest buffer among all to be
+    // accounted for total memory check, with scratchpad not included among
+    // those.
+    // ANCHOR: LAZY_MAPPING.
     const bool mapped_mem_factor = !is_cpu()
             && !has_bench_mode_modifier(mode_modifier_t::no_ref_memory);
 
@@ -1470,6 +1485,12 @@ int collect_mem_size(check_mem_size_args_t &mem_size_args,
     check_mem_size_args.sizes.push_back(scratchpad_size);
     check_mem_size_args.total_size_device += scratchpad_size;
     check_mem_size_args.scratchpad_size = scratchpad_size;
+    //   Add mapped size for scratchpad due to it gets mapped unconditionally
+    //   when it gets created and then after the execution ends followed by
+    //   comparison which creates a memory object and may trigger a memory
+    //   over-consumption error message.
+    //   ANCHOR: LAZY_MAPPING.
+    check_mem_size_args.total_size_mapped += scratchpad_size;
 
     // Get output sizes.
     check_mem_size_args.want_input = false;

@@ -14,9 +14,9 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include "gemmstone/config.hpp"
 #include "gemmstone/strategy.hpp"
 #include "gpu/intel/gemm/jit/generator_dsl/kernel_desc.hpp"
-#include "gpu/intel/gemm/jit/include/gemmstone/config.hpp"
 #include "gpu/intel/jit/dsl/dsl.hpp"
 #include "gpu/intel/jit/pass/pass.hpp"
 #include "gpu/intel/jit/utils/trace.hpp"
@@ -96,12 +96,11 @@ struct transform_t {
 
         switch (normalized) {
             case kind_t::none:
-                return layout_t(
-                        type, 0, {{col_var, col, 1}, {row_var, row, col}});
+                return layout_t(type, {{col_var, col, 1}, {row_var, row, col}});
 
             case kind_t::block: {
                 int col_outer = (int)(col / col_inner);
-                return layout_t(type, 0,
+                return layout_t(type,
                         {{col_var, col_inner, 1}, {row_var, row, col_inner},
                                 {col_var, col_outer, row * col_inner}});
             }
@@ -110,7 +109,7 @@ struct transform_t {
                 int row_inner = 4 / t;
                 int row_outer = (int)(row / row_inner);
                 int col_outer = (int)(col / col_inner);
-                return layout_t(type, 0,
+                return layout_t(type,
                         {{row_var, row_inner, 1},
                                 {col_var, col_inner, row_inner},
                                 {row_var, row_outer, col_inner * row_inner},
@@ -120,7 +119,7 @@ struct transform_t {
 
             // Impossible to hit due to normalization
             case kind_t::transpose_vnni:
-            default: gpu_assert(false); return {};
+            default: stub(); return {};
         }
     }
 
@@ -130,7 +129,7 @@ struct transform_t {
                 return ir::send_cache_hint_t::load_once;
             case ngen::CacheSettingsLSC::Default:
                 return ir::send_cache_hint_t::hw_default;
-            default: gpu_assert(false); return ir::send_cache_hint_t::undef;
+            default: stub(); return ir::send_cache_hint_t::undef;
         }
     }
 
@@ -211,7 +210,7 @@ struct tensor_config_t {
         : transform(t) {
         tile = g.tile;
         layout = t.get_layout(g.tile, g.type);
-        layout = layout.add_outer_block(k_var, copies, layout.elems());
+        layout = layout.with_block({k_var, copies});
     }
 
     ir::tile_t tile;
@@ -272,12 +271,10 @@ void apply_post_ops(const dnnl::impl::gpu::intel::gpu_post_ops_t &ops,
 
             layout_t src_layout = {src_g.type};
             for (auto &b : C.layout.blocks()) {
-                if (!e.src1_desc.is_broadcast(dim_to_md[b.dim], ndims)) {
-                    src_layout = src_layout.add_outer_block(
-                            b.dim, b.block, src_layout.elems());
+                if (!e.src1_desc.is_broadcast(dim_to_md[b.idx], ndims)) {
+                    src_layout = src_layout.with_block({b.idx, b.size});
                 } else {
-                    src_layout = src_layout.add_outer_block(
-                            b.dim, 1, src_layout.elems());
+                    src_layout = src_layout.with_block({b.idx, 1});
                 }
             }
 
@@ -397,7 +394,7 @@ struct generator_dsl_t {
     generator_dsl_t(const generator_dsl_desc_t &desc)
         : problem(desc.problem), strategy(desc.strategy) {}
 
-    kernel_t build(ir::kernel_iface_t iface, ir::ir_context_t &ctx) {
+    kernel_t build(ir::kernel::iface_t iface, ir::ir_context_t &ctx) {
         if (strategy.kParallel || strategy.kParallelLocal) {
             gpu_warning() << "kParallel support is unimplemented";
             return {};
@@ -461,7 +458,7 @@ struct generator_dsl_t {
         tensor_t C = def("C_blk",
                 C_store_transform.get_layout(C_dims, into_ir(problem.Tc)), 0);
 
-        idx_t subgroup_dim = C.layout.blocks()[0].dim;
+        idx_t subgroup_dim = C.layout[0].idx;
         int m_group_idx = strategy.loopOrder[0] == LoopM ? 0 : 1;
         auto m_idx = let("m_idx",
                 (group_id(m_group_idx) * local_size(m_group_idx)
@@ -564,7 +561,8 @@ struct generator_dsl_t {
                           << strategy.prefetchB << " -> " << prefetchB;
 
         k_loop_config_t k_loop_main {k_blk, prefetchA, prefetchB, kloop_it,
-                A_load, B_load, A_prefetch_transform, B_prefetch_transform, C};
+                std::move(A_load), std::move(B_load), A_prefetch_transform,
+                B_prefetch_transform, C};
 
         gpu_assert(k_loop_main.A_load_warmup() % kloop_it.A_load().tile[k_var]
                 == 0);
@@ -576,8 +574,8 @@ struct generator_dsl_t {
 
         k_loop_config_t k_loop_short {
                 (int)lcm(A_load_short.tile[k_var], B_load_short.tile[k_var]), 0,
-                0, kloop_it, A_load_short, B_load_short, A_prefetch_transform,
-                B_prefetch_transform, C};
+                0, kloop_it, std::move(A_load_short), std::move(B_load_short),
+                A_prefetch_transform, B_prefetch_transform, std::move(C)};
         gpu_assert(k_loop_short.k_warmup() == 0);
 
         if (problem.A.alignment) {
@@ -613,10 +611,10 @@ struct generator_dsl_t {
         tensor_t C;
 
         int A_load_warmup() const {
-            return A_load.layout.dim(k_var) - A_load.tile[k_var];
+            return A_load.layout.elems(k_var) - A_load.tile[k_var];
         }
         int B_load_warmup() const {
-            return B_load.layout.dim(k_var) - B_load.tile[k_var];
+            return B_load.layout.elems(k_var) - B_load.tile[k_var];
         }
         int k_warmup() const {
             return std::max({A_load_warmup(), B_load_warmup(),
@@ -654,7 +652,7 @@ struct generator_dsl_t {
         int A_load_blk = cfg.A_load.tile[k_var];
         auto A_load = [&](int k_unroll_idx) {
             int idx = pipeline_idx(k_unroll_idx, cfg.A_load_warmup(),
-                    cfg.A_load.layout.dim(k_var));
+                    cfg.A_load.layout.elems(k_var));
             if (idx % A_load_blk != 0) return;
             load(A.sub(cfg.A_load.tile, {{k_var, idx}}), kloop_it.A_load(),
                     {{k_var, 0}}, {cfg.A_load.transform.cache_hint});
@@ -676,7 +674,7 @@ struct generator_dsl_t {
         int B_load_blk = cfg.B_load.tile[k_var];
         auto B_load = [&](int k_unroll_idx) {
             int idx = pipeline_idx(k_unroll_idx, cfg.B_load_warmup(),
-                    cfg.B_load.layout.dim(k_var));
+                    cfg.B_load.layout.elems(k_var));
             if (idx % B_load_blk != 0) return;
             load(B.sub(cfg.B_load.tile, {{k_var, idx}}), kloop_it.B_load(),
                     {{k_var, 0}}, {cfg.B_load.transform.cache_hint});
@@ -751,7 +749,7 @@ struct generator_dsl_t {
 
 kernel_t make_kernel(
         const generator_dsl_desc_t &desc, ir::constraint_set_t cset) {
-    ir::ir_context_t ctx(desc.exec_cfg, cset);
+    ir::ir_context_t ctx(desc.options, cset);
 
     ir::trace_start();
     auto k = generator_dsl_t(desc).build(desc.kernel_iface(), ctx);

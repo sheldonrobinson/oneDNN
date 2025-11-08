@@ -108,7 +108,7 @@ int __attribute__((overloadable)) rnd_down(long a, unsigned int b) {
 #define MATH_UTILS_DECLARE_BF16 1
 #endif
 
-#if DST_SCALES_DT_E8M0
+#if DST_SCALES_DT_E8M0 || SRC_SCALES_DT_E8M0 || WEI_SCALES_DT_E8M0
 #define MATH_UTILS_DECLARE_E8M0 1
 #endif
 
@@ -117,11 +117,15 @@ ushort16 __builtin_IB_simd_block_read_16_global_h(const __global ushort *);
 
 void __builtin_IB_simd_block_write_8_global_l(__global ulong *, ulong8);
 void __builtin_IB_simd_block_write_16_global_h(__global ushort *, ushort16);
+
+#if MATH_UTILS_DECLARE_E8M0
 float __attribute__((overloadable)) cvt_e8m0_to_f32(uchar f) {
     if (f == (uchar)0xff) return as_float(0xffc00000);
+    if (f == (uchar)0x00) return as_float(0x00400000);
     uint bits = f << 23;
     return as_float(bits);
 }
+#endif
 
 #if MATH_UTILS_DECLARE_HF8
 // Emulation functions for f8_e4m3 <-> f16 conversion.
@@ -395,8 +399,6 @@ float2  __attribute__((overloadable)) cvt_bf16_to_f32(ushort2  a) { return __bui
 float4  __attribute__((overloadable)) cvt_bf16_to_f32(ushort4  a) { return __builtin_IB_bftof_4 (as_short4 (a)); }
 float8  __attribute__((overloadable)) cvt_bf16_to_f32(ushort8  a) { return __builtin_IB_bftof_8 (as_short8 (a)); }
 float16 __attribute__((overloadable)) cvt_bf16_to_f32(ushort16 a) { return __builtin_IB_bftof_16(as_short16(a)); }
-
-float   __attribute__((overloadable)) cvt_bf16_to_f32(bf16     a) { return __builtin_IB_bftof_1 (a.data); }
 
 #ifdef cl_khr_fp64
 double   __attribute__((overloadable)) cvt_bf16_to_f64(ushort   a) { return convert_double(__builtin_IB_bftof_1 (as_short  (a))); }

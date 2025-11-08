@@ -25,7 +25,6 @@
 #include "common/cpp_compat.hpp"
 #include "common/math_utils.hpp"
 #include "gpu/intel/jit/ir/ir.hpp"
-#include "gpu/intel/jit/ir/linear_expr.hpp"
 #include "gpu/intel/jit/utils/trace.hpp"
 #include "gpu/intel/jit/utils/utils.hpp"
 
@@ -1451,8 +1450,7 @@ public:
         int64_t max_gcd = 0;
         auto *a_nary = a.as_ptr<nary_op_t>();
         for (auto &e : a_nary->args) {
-            int64_t gcd = math::gcd(b_gcd, const_factor(e));
-            if (gcd > max_gcd) max_gcd = gcd;
+            max_gcd = std::max(max_gcd, math::gcd(b_gcd, const_factor(e)));
         }
 
         if (max_gcd == 0) return expr_t();
@@ -2086,11 +2084,11 @@ expr_t const_fold_binary(const type_t &compute_type, op_kind_t op_kind,
         const expr_t &a, const expr_t &b) {
     if (!compute_type.is_scalar()) {
         int elems = compute_type.elems();
-        auto scalar_type = compute_type.scalar();
+        auto base_type = compute_type.base();
         std::vector<expr_t> ret;
         ret.reserve(elems);
         for (int i = 0; i < elems; i++) {
-            ret.push_back(const_fold_binary(scalar_type, op_kind, a[i], b[i]));
+            ret.push_back(const_fold_binary(base_type, op_kind, a[i], b[i]));
         }
         return shuffle_t::make(ret);
     }

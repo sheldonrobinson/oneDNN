@@ -126,7 +126,12 @@ struct multi_t : public primitive_t {
                       r_args[DNNL_ARG_DST] = ctx.args().at(DNNL_ARG_DST);
                       exec_ctx_t r_ctx(ctx, std::move(r_args));
 
-                      r_ctx.set_scratchpad_grantor(ctx.grantor_handle());
+                      // There's actually no scratchpad allocated for this impl.
+                      auto *nested_grantor = create_nested_grantor(
+                              ctx.get_scratchpad_grantor(),
+                              memory_tracking::names::key_nested,
+                              concat->pd()->scratchpad_registry());
+                      r_ctx.set_scratchpad_grantor(nested_grantor);
                       return concat->execute(r_ctx);
                   };
 

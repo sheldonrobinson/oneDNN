@@ -84,22 +84,22 @@ status_t lnorm_desc_init(layer_normalization_desc_t *lnorm_desc,
                            .has_runtime_dims_or_strides()
                 || memory_desc_wrapper(diff_dst_desc)
                            .has_runtime_dims_or_strides();
-    VCONDCHECK(primitive, create, check, lnorm, !runtime_dims_or_strides,
-            status::unimplemented, VERBOSE_RUNTIMEDIM_UNSUPPORTED);
+    VCHECK_LNORM_UNIMPL(
+            !runtime_dims_or_strides, VERBOSE_RUNTIMEDIM_UNSUPPORTED);
 
     ld.src_desc = *src_desc;
     if (is_fwd) ld.dst_desc = *dst_desc;
     if (!is_fwd) ld.diff_src_desc = *diff_src_desc;
     if (!is_fwd) ld.diff_dst_desc = *diff_dst_desc;
 
-    if (stat_desc)
-        ld.stat_desc = *stat_desc;
-    else
+    if (types::is_zero_md(stat_desc)) {
         VCHECK_LNORM(
                 memory_desc_init_by_tag(ld.stat_desc, ld.src_desc.ndims - 1,
                         ld.src_desc.dims, data_type::f32, format_tag::any)
                         == success,
                 VERBOSE_UNSUPPORTED_TAG_S, "stats");
+    } else
+        ld.stat_desc = *stat_desc;
 
     int ndims = src_desc->ndims;
     ld.data_scaleshift_desc = zero_md();
@@ -125,7 +125,8 @@ status_t lnorm_desc_init(layer_normalization_desc_t *lnorm_desc,
 #define CHECK_DIMS(t1, t2, off_ndims) \
     do { \
         VCHECK_LNORM(ld.t1##_desc.ndims == ld.t2##_desc.ndims + (off_ndims), \
-                VERBOSE_INCONSISTENT_NDIMS, #t1, #t2); \
+                VERBOSE_INCONSISTENT_NDIMS_WITH_VALS, #t1, #t2, \
+                ld.t1##_desc.ndims, ld.t2##_desc.ndims + (off_ndims)); \
         VCHECK_LNORM(array_cmp(ld.t1##_desc.dims, ld.t2##_desc.dims, \
                              ld.t2##_desc.ndims), \
                 VERBOSE_INCONSISTENT_DIM, #t1, -1, #t2, -1); \

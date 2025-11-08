@@ -139,7 +139,7 @@ public:
         int max_tries = 100;
         config_t cfg;
         layout_t zp_dst;
-        if (data.zp_pd) zp_dst = layout_t(zp_md_out(data), false);
+        if (data.zp_pd) zp_dst = make_layout(*zp_md_out(data));
 
         if (primitive->cache_blob()) {
             tiler->set_cur_version(primitive->version());
@@ -183,7 +183,7 @@ public:
                             break;
                         }
                         case kernel_id_t::pre_reorder: {
-                            reorder::jit::config_t reorder_cfg(cfg.exec_cfg(),
+                            reorder::jit::config_t reorder_cfg(cfg.options(),
                                     tensor_cfg.user_layout(info.arg_name(1)),
                                     tensor_cfg.compute_layout(
                                             info.arg_name(1)));
@@ -196,7 +196,7 @@ public:
                             break;
                         }
                         case kernel_id_t::post_reorder: {
-                            reorder::jit::config_t reorder_cfg(cfg.exec_cfg(),
+                            reorder::jit::config_t reorder_cfg(cfg.options(),
                                     tensor_cfg.compute_layout(info.arg_name(0)),
                                     tensor_cfg.user_layout(info.arg_name(0)));
                             tmp_kernels.push_back(
@@ -215,7 +215,7 @@ public:
                             tmp_kernels.push_back(
                                     make_kernel<zero_out_kernel_t>(primitive,
                                             /*register_kernel=*/false, engine,
-                                            cfg.exec_cfg(), info,
+                                            cfg.options(), info,
                                             cfg.is_dpas_or_dpasw_fma(),
                                             engine));
                             break;
@@ -302,8 +302,10 @@ public:
                     e_args[DNNL_ARG_DST] = memory_arg_t {zp_dst.get(), false};
                     exec_ctx_t e_ctx(ctx, std::move(e_args));
                     const auto nm = memory_tracking::names::key_nested_multiple;
-                    nested_scratchpad_t ns(ctx, nm, zp_prim_);
-                    e_ctx.set_scratchpad_grantor(ns.grantor());
+                    auto *nested_grantor = create_nested_grantor(
+                            ctx.get_scratchpad_grantor(), nm,
+                            zp_prim_->pd()->scratchpad_registry());
+                    e_ctx.set_scratchpad_grantor(nested_grantor);
                     CONV_CHECK(zp_prim_->execute(e_ctx));
                 }
                 nsubmitted++;
@@ -360,7 +362,7 @@ private:
                     && cfg.zp_cfg().needs_src_conv_precalc;
 
             const auto compute_buf = make_buffer(t.name);
-            size_t compute_size = t.compute_layout.size();
+            size_t compute_size = size_bytes(t.compute_layout);
             int compute_arg_key = t.arg_key;
 
             if (compute_arg_key == DNNL_ARG_UNDEF) {
@@ -405,7 +407,7 @@ private:
                             /*is_input=*/true);
                     add_compute_arg(reorder_info, compute_buf, false);
                     reorder::jit::config_t reorder_cfg(
-                            cfg.exec_cfg(), t.user_layout, t.compute_layout);
+                            cfg.options(), t.user_layout, t.compute_layout);
                     reorder_info.set_nd_range(reorder_cfg.nd_range());
                 }
                 if (!src_conv_precalc && t.is_output) {
@@ -415,7 +417,7 @@ private:
                     reorder_info.register_user_arg(user_buf, user_arg_key,
                             /*is_input=*/false);
                     reorder::jit::config_t reorder_cfg(
-                            cfg.exec_cfg(), t.compute_layout, t.user_layout);
+                            cfg.options(), t.compute_layout, t.user_layout);
                     reorder_info.set_nd_range(reorder_cfg.nd_range());
                 }
                 if (src_conv_precalc) {

@@ -43,10 +43,13 @@ status_t with_post_ops_t::pd_t::init(impl::engine_t *engine) {
     VDISPATCH_GEMM(attr()->has_default_values(attr_skip_mask),
             VERBOSE_UNSUPPORTED_ATTR);
     VDISPATCH_GEMM(!utils::one_of(d->c_type(), u4, s4), VERBOSE_UNSUPPORTED_DT);
-    VDISPATCH_GEMM(!attr()->scales_.has_host_scalars(),
-            VERBOSE_UNSUPPORTED_SCALES_CFG);
-    VDISPATCH_GEMM(!attr()->zero_points_.has_host_scalars(),
-            VERBOSE_UNSUPPORTED_SCALES_CFG);
+
+    // gemm_post_ops kernel supports only dst zero-point,
+    // host scalar is also supported for dst zp
+    const auto &zps = attr()->zero_points_;
+    VDISPATCH_GEMM(!(zps.get(DNNL_ARG_SRC).is_host_scalar()
+                           || zps.get(DNNL_ARG_WEIGHTS).is_host_scalar()),
+            VERBOSE_UNSUPPORTED_ZP_CFG);
 
     const primitive_attr_t *attributes_with_po = attr();
     for (int arg : {DNNL_ARG_SRC, DNNL_ARG_WEIGHTS, DNNL_ARG_DST}) {
@@ -232,15 +235,12 @@ status_t with_post_ops_t::execute(const exec_ctx_t &ctx) const {
 
         nested_args.c = c_mem_before_po_worker->memory_storage();
     }
-    impl::exec_ctx_t tmp_ctx(ctx.stream());
-    tmp_ctx.set_resource_mapper(ctx.get_resource_mapper());
-    tmp_ctx.set_scratchpad_grantor(&ctx.get_scratchpad_grantor());
-    nested_scratchpad_t ns(
-            tmp_ctx, memory_tracking::names::key_nested_multiple, prim_);
 
-    exec_ctx_t nested_ctx(ctx.stream(), nested_args, ctx.desc());
-    nested_ctx.set_resource_mapper(ctx.get_resource_mapper());
-    nested_ctx.set_scratchpad_grantor(ns.grantor());
+    exec_ctx_t nested_ctx(ctx, nested_args, ctx.desc());
+    auto *nested_grantor = create_nested_grantor(ctx.get_scratchpad_grantor(),
+            memory_tracking::names::key_nested_multiple,
+            prim_->pd()->scratchpad_registry());
+    nested_ctx.set_scratchpad_grantor(nested_grantor);
 
     CHECK(gemm(prim_)->execute(nested_ctx));
 

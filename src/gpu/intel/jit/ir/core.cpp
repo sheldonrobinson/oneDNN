@@ -29,25 +29,6 @@ namespace jit {
 expr_t const_fold_non_recursive(const expr_t &expr);
 object_t const_fold(const object_t &obj);
 
-data_type_t to_dnnl(const type_t &type) {
-    gpu_assert(type.elems() == 1) << type;
-    gpu_assert(!type.is_ptr() == 1) << type;
-    if (type.is_f4_e3m0()) return data_type::f4_e3m0;
-    if (type.is_f4_e2m1()) return data_type::f4_e2m1;
-    if (type.is_bf8()) return data_type::f8_e5m2;
-    if (type.is_hf8()) return data_type::f8_e4m3;
-    if (type.is_bf16()) return data_type::bf16;
-    if (type.is_f16()) return data_type::f16;
-    if (type.is_tf32()) return data_type::tf32;
-    if (type.is_f32()) return data_type::f32;
-    if (type.is_f64()) return data_type::f64;
-    if (type.is_s32()) return data_type::s32;
-    if (type.is_s8()) return data_type::s8;
-    if (type.is_u8()) return data_type::u8;
-    gpu_error_not_expected();
-    return data_type::undef;
-}
-
 std::string to_string(op_kind_t kind) {
     switch (kind) {
         case op_kind_t::_minus: return "-";
@@ -158,8 +139,8 @@ type_t common_int_type_impl(const type_t &_a, const type_t &_b) {
     // Promote to s32 first.
     type_t a = _a.size() < int(sizeof(int32_t)) ? type_t::s32() : _a;
     type_t b = _b.size() < int(sizeof(int32_t)) ? type_t::s32() : _b;
-    a = a.scalar();
-    b = b.scalar();
+    a = a.base();
+    b = b.base();
 
     // Integer promotion, follow C++ rules.
     int common_bits = 8 * std::max(a.size(), b.size());
@@ -282,9 +263,16 @@ void normalize_ptr(const type_t &type, expr_t &base_expr, expr_t &off) {
     if (base_expr.is<ptr_t>()) {
         off = const_fold_non_recursive(base_expr.as<ptr_t>().off + off);
         base_expr = base_expr.as<ptr_t>().base;
+        return;
     }
-    gpu_assert(to_cpp<int64_t>(off) % type.scalar().size() == 0)
-            << "Incompatible offset: " << off;
+    gpu_assert(is_const(off)) << "var/ref requires constant offset.";
+    if (auto *ref = base_expr.as_ptr<ref_t>()) {
+        off = const_fold_non_recursive(ref->off + off);
+        base_expr = ref->var;
+        return;
+    }
+    if (base_expr.is<var_t>()) return;
+    gpu_error_not_expected() << "Unexpected expression: " << base_expr.str();
 }
 
 expr_t linear_t::to_expr() const {

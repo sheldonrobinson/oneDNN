@@ -17,7 +17,7 @@
 #ifndef GPU_INTEL_JIT_IR_V2_BRIDGE_HPP
 #define GPU_INTEL_JIT_IR_V2_BRIDGE_HPP
 
-#include "gpu/intel/jit/ir/message.hpp"
+#include "gpu/intel/jit/ir/send.hpp"
 #include "gpu/intel/jit/ir/tensor.hpp"
 #include "gpu/intel/jit/ir/v2/send.hpp"
 #include "gpu/intel/jit/ir/v2/tensor.hpp"
@@ -78,7 +78,7 @@ inline jit::layout_t to_ir(const layout_t &layout) {
     }
 
     return jit::layout_t(
-            layout.type(), layout.desc().ndims(), layout.base(), blocks);
+            layout.type(), blocks, layout.base(), layout.desc().ndims());
 }
 
 } // namespace v2

@@ -14,6 +14,7 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include "gpu/intel/include/conversion.h"
 #include "gpu/intel/include/tile_ops.h"
 #include "gpu/intel/include/types_interop.h"
 #include "gpu/intel/sdpa/utils.h"
@@ -371,7 +372,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) kernel void
 micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         const global VAL_DATA_T *V, global DST_DATA_T *A,
 #if WITH_HOST_SCALE
-        SCALE_DATA_T scale_val,
+        float scalar_scale, float inv_scalar_scale,
 #else
         const global SCALE_DATA_T *scale_ptr,
 #endif
@@ -477,9 +478,9 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
     A += DST_BATCH(b1, b0);
 #if WITH_ATTN_MASK
     msk += MSK_BATCH(b1 % MSK_D0, b0 % MSK_D1);
-#if BLOCK_MSK == false
     int mask_aligned = (((size_t)msk) % 4) == 0;
-#endif
+    bool block_msk = (b1 < MSK_D0 - ceil((float)ugemm_kq_wg_tile_m / k))
+            && mask_aligned;
 #endif
 
 #if KEY_SCALES
@@ -524,11 +525,11 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
 #if WITH_ATTN_SCALE
 #if WITH_HOST_SCALE
 #if INVERT_SCALE
-        iscale = SCALES_TO_FLOAT(scale_val);
-        scale = native_recip(iscale);
+        iscale = scalar_scale;
+        scale = inv_scalar_scale;
 #else
-        scale = SCALES_TO_FLOAT(scale_val);
-        iscale = native_recip(scale);
+        scale = scalar_scale;
+        iscale = inv_scalar_scale;
 #endif
 #else
 #if INVERT_SCALE
@@ -638,15 +639,11 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         /* Load mask. No remainder handling needed assuming k block size is a power of 2. */
         mask_tile_type mask_tile;
 #if BROADCAST_MASK_Q
-#if BLOCK_MSK
-        tile_load_block(&mask_tile, msk, 0, k0 + sg_i0_kq, 0);
-#else
-        if (mask_aligned) {
-            tile_load_block(&mask_tile, msk, 0, k0 + sg_i0_kq, 0);
+        if (block_msk) {
+            tile_load_block(&mask_tile, msk, k, 0, k0 + sg_i0_kq, 0);
         } else {
-            tile_load_full(&mask_tile, msk, 0, k0 + sg_i0_kq, 0);
+            tile_load(&mask_tile, msk, k, 1, k0 + sg_i0_kq, 0);
         }
-#endif
 #else
         tile_load_t(&mask_tile, msk, q, k, sg_j0_kq + wg_j0, k0 + sg_i0_kq);
 #endif
@@ -926,7 +923,7 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
 #if BROADCAST_MASK_Q
             cooperative_prefetch_2d_maybe_rem(
                     /* ptr */ msk + knext,
-                    /* r */ k0end - k0,
+                    /* r */ k0end - k0 - ugemm_kq_wg_tile_m,
                     /* c */ 1,
                     /* rmax */ ugemm_kq_wg_tile_m,
                     /* cmax */ 1,

@@ -205,6 +205,37 @@ struct brg_blocking_t : public jit_brgemm_conv_conf_t {
     loop_t loop[MAXNLOOPS];
 };
 
+dim_t get_comp_ow_size(const jit_brgemm_conv_conf_t &jcp) {
+    if (jcp.exec_type == exec_vpad) return 1;
+
+    const auto IW = jcp.iw;
+    const auto DW = jcp.dilate_w + 1;
+    const auto KW = jcp.kw;
+    const auto SW = jcp.stride_w;
+    const auto LP = jcp.l_pad;
+    dim_t comp_ow_size = 0;
+
+    for (int ow = 0; ow < jcp.ow;) {
+        const auto iiw = ow * SW - LP;
+        const auto kw_s = div_up(nstl::max(0, -iiw), DW);
+        const auto kw_f
+                = KW - div_up(nstl::max(0, iiw - IW + (KW - 1) * DW + 1), DW);
+        int ow_e = ow;
+        while (ow_e < jcp.ow) {
+            const auto iiw_e = ow_e * SW - LP;
+            const auto cur_kw_s = div_up(nstl::max(0, -iiw_e), DW);
+            const auto cur_kw_f = KW
+                    - div_up(nstl::max(0, iiw_e - IW + (KW - 1) * DW + 1), DW);
+            if (cur_kw_s != kw_s || cur_kw_f != kw_f) break;
+            if (ow_e - ow < jcp.ow_block) comp_ow_size++;
+            ow_e++;
+        }
+        ow = ow_e;
+    }
+
+    return comp_ow_size;
+}
+
 bool is_any_eligible(const jit_brgemm_conv_conf_t &jcp) {
     return (jcp.prop_kind == prop_kind::forward_inference || jcp.wei_plain
             || one_of(jcp.wei_dt, data_type::s8, data_type::f16,
@@ -630,6 +661,7 @@ status_t brg_blocking_t::estimate_brgemm_ur() {
                                        : brgemm_broadcast_t::none;
     }
     brgemm_attr_t brgattr;
+    brgattr.use_uker = use_uker;
     brgattr.max_bs = max_batch;
     max_vpad = exec_type == exec_vpad ? nstl::max(l_pad, r_pad) : 0;
     brgattr.max_top_vpad = max_vpad;
@@ -729,6 +761,7 @@ status_t brg_blocking_t::get_brgemm_ur(
                 vK, strides_ptr, is_bf32, is_tf32));
 
         brgemm_attr_t brgattr;
+        brgattr.use_uker = use_uker;
         brgattr.max_bs = max_batch;
         max_vpad = exec_type == exec_vpad ? nstl::max(l_pad, r_pad) : 0;
         brgattr.max_top_vpad = max_vpad;
@@ -2240,16 +2273,18 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
                 && IMPLICATION(jcp.wei_dt == f16, isa != avx10_1_512)
                 && jcp.ic * rd_ksize > rd_padded_block;
 
+        // Disable os blocking to avoid using large buffer
+        // The value is empirical
         jcp.is_os_blocking = jcp.f_pad < jcp.kd && jcp.back_pad < jcp.kd
                 && jcp.t_pad < jcp.kh && jcp.b_pad < jcp.kh
-                && jcp.r_pad < jcp.kw && jcp.l_pad < jcp.kw;
+                && jcp.r_pad < jcp.kw && jcp.l_pad < jcp.kw && jcp.iwp < 10800;
 
         if (is_amx(isa)
                 && IMPLICATION(!jcp.is_relo(),
                         /* heuristic */ jcp.ow < 256)) {
             jcp.use_M_mask = jcp.is_os_blocking ? 2 : 0;
             jcp.use_uker = true;
-            jcp.use_interleave_stores = true;
+            jcp.use_interleave_stores = jcp.use_uker;
             jcp.hint_prefetching = brgemm_kernel_prefetching_t::brgemm_prf0;
             // assuming 2x2 decomposition in amx brgemm kernel
             // and overlap of input by kw
@@ -2284,7 +2319,7 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
         jcp.exec_type = exec_base;
         if (is_amx(isa) && jcp.ow < (8 * 1024)) {
             jcp.use_uker = true;
-            jcp.use_interleave_stores = true;
+            jcp.use_interleave_stores = jcp.use_uker;
             jcp.hint_prefetching = brgemm_kernel_prefetching_t::brgemm_prf0;
         }
 
@@ -2403,18 +2438,10 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
                     * nstl::min(
                             jcp.oh, rnd_up(jcp.oh_block + kh_cnt, jcp.oh_block))
                                                       : kd_cnt * kh_cnt;
-    const auto comp_buffer_ow = jcp.exec_type != exec_vpad ? jcp.ow : 1;
+    jcp.comp_ow_size = get_comp_ow_size(jcp);
     jcp.comp_a_buffer_size = jcp.ngroups * jcp.nb_oc * jcp.ker_ranges_size
-            * comp_buffer_ow * jcp.oc_block;
+            * jcp.comp_ow_size * jcp.oc_block;
     jcp.s8s8_comp_buffer_size = jcp.comp_a_buffer_size;
-
-    // Dispatch the shapes to VNNI for better performance
-    // TODO: optimize the perf for zero point with large buffer on AMX
-    if (is_amx(isa) && jcp.src_zero_point && jcp.exec_type == exec_trans
-            && (jcp.l_pad > 0 || jcp.r_pad > 0) && jcp.oc * jcp.ow > 8192)
-        VDISPATCH_CONV_IC(!allow_perf_heuristics(jcp),
-                VERBOSE_IMPL_HEURISTIC_FAIL,
-                "no optimization for zero point on amx")
 
     // For padding shapes, we calculate the comp along with the computation
     // inside brgemm kernel when output size is small to get optimal perf
@@ -2586,7 +2613,7 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
         // non-unrolled kernel does not support bf32, only dispatch unrolled
         // kernel for now
         jcp.use_uker = jcp.is_bf32 || !is_small_mb;
-        jcp.use_interleave_stores = true;
+        jcp.use_interleave_stores = jcp.use_uker;
     }
 
     // TODO: heuristic to dispatch BF32 BRGeMM
@@ -2656,6 +2683,7 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
         weights_md.extra.asymm_compensation_mask = with_groups ? 0x3 : 0x1;
     }
     jcp.req_cal_comp_pad = false;
+    jcp.comp_ow_size = 1;
     jcp.s8s8_comp_buffer_size = jcp.ngroups * jcp.nb_oc * jcp.oc_block;
     jcp.comp_a_buffer_size = jcp.ngroups * jcp.nb_oc * jcp.oc_block;
 

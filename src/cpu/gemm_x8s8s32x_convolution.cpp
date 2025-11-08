@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2017-2025 Intel Corporation
+* Copyright 2025 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -127,7 +128,7 @@ status_t gemm_x8s8s32x_convolution_fwd_t::execute_forward(
             = binary_injector_utils::prepare_binary_args(
                     this->pd()->attr()->post_ops_, ctx);
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     assert(IMPLICATION(jcp.ow_block != jcp.ow, jcp.oh_block == 1));
 
@@ -307,7 +308,7 @@ status_t gemm_x8s8s32x_convolution_fwd_t::execute_forward_thr(const int ithr,
                 balance211(N * jcp.oc, nthr, ithr, _start, _end);
 
                 (*pp_ker_)(dst, acc, bia_base, scales, dst_scales[0], sum_scale,
-                        1.f / wei_adj_scale, g, _start, _end, zp,
+                        1.f / wei_adj_scale, g, n, _start, _end, zp,
                         post_ops_binary_rhs_arg_vec, dst_base, ctx,
                         *pd()->dst_md(), chunk_desc);
             });
@@ -325,7 +326,7 @@ status_t gemm_x8s8s32x_convolution_bwd_data_t::execute_backward_data(
     auto bia_base = CTX_IN_MEM(const char *, DNNL_ARG_BIAS);
     auto diff_src_base = CTX_OUT_MEM(char *, DNNL_ARG_DIFF_SRC);
 
-    auto scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     const conv_gemm_conf_t &jcp = this->pd()->jcp_;
 

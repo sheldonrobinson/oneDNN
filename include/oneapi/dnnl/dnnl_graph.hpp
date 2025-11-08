@@ -997,6 +997,9 @@ public:
         /// Specifies a weights_format of an op. The value can be "OIX", "XIO",
         /// "IOX", or "XOI". Different operations may support different values.
         weights_format = dnnl_graph_op_attr_weights_format,
+        /// Specifies an accumulation_mode attribute to an op. The value can be
+        /// "strict", "relaxed", "any", "f32", "s32", or "f16".
+        accumulation_mode = dnnl_graph_op_attr_accumulation_mode,
 
         /// Specifies the end of all above exteral attributes for check.
         end = dnnl_graph_op_attr_end,
@@ -1633,6 +1636,51 @@ inline size_t get_constant_tensor_cache_capacity(engine::kind kind) {
 }
 
 /// @} dnnl_graph_api_constant_tensor_cache
+
+/// @addtogroup dnnl_graph_api_dump_mode Dump Mode
+///
+/// Control graph dumping behavior
+///
+/// @{
+
+/// @enum graph_dump_mode
+/// Dump mode bitmask for graph debugging utilities.
+enum class graph_dump_mode : unsigned {
+    /// Disable all graph dumps.
+    none = dnnl_graph_dump_mode_none,
+    /// Dump subgraphs extracted during partitioning.
+    subgraph = dnnl_graph_dump_mode_subgraph,
+    /// Dump the full graph prior to partitioning.
+    graph = dnnl_graph_dump_mode_graph,
+};
+
+DNNL_DEFINE_BITMASK_OPS(graph_dump_mode)
+
+/// Configures graph dump modes at runtime.
+///
+/// @note
+///     Enabling graph dump affects performance.
+///     This setting overrides the ONEDNN_GRAPH_DUMP environment variable.
+///
+/// @param modes Bitmask composed of values from #dnnl::graph::graph_dump_mode.
+///     Accepted values:
+///      - #dnnl::graph::graph_dump_mode::graph: dump the full graph prior to
+///        partitioning.
+///      - #dnnl::graph::graph_dump_mode::subgraph: dump each partitioned subgraph.
+///      - #dnnl::graph::graph_dump_mode::none: disable all graph dumping.
+///
+///     Bitmask combinations using bitwise operators are supported. For
+///     instance, `graph | subgraph` enables both modes, `none | graph`
+///     behaves like `graph`, and `none & graph` behaves like `none`.
+/// @returns #dnnl::status::invalid_arguments if the
+///     @p modes value contains unsupported bits or graph dump is disabled,
+///     and #dnnl::status::success on success.
+inline status set_dump_mode(graph_dump_mode modes) {
+    return static_cast<status>(dnnl_graph_set_dump_mode(
+            static_cast<dnnl_graph_dump_mode_t>(static_cast<unsigned>(modes))));
+}
+
+/// @} dnnl_graph_api_dump_mode
 
 } // namespace graph
 

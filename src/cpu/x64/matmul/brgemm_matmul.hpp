@@ -71,6 +71,13 @@ struct brgemm_matmul_t : public primitive_t {
     private:
         brgemm_desc_t brg_descs_[max_num_brg_kernels_matmul];
         brgemm_matmul_conf_t bgmmc_;
+
+        /**
+         * This function checks whether the current problem can be handled by
+         * the GEMM-based matmul implementation to avoid falling back to the
+         * reference implementation.
+         */
+        bool can_use_gemm_fallback(engine_t *engine) const;
     };
 
     brgemm_matmul_t(const pd_t *apd) : primitive_t(apd) {}
@@ -94,7 +101,7 @@ private:
 
     bool determine_prefetch(const int mc, const int m_end, const int nc,
             const int n_end, const brgemm_matmul_conf_t &bgmmc,
-            brg_matmul_exec_ctx_t &brgmm_ctx) const;
+            const brg_matmul_exec_ctx_t &brgmm_ctx) const;
 
     void copy_a_chunk_in_buffer(const brg_matmul_exec_ctx_t &brgmm_ctx,
             const char *A_data_batch_ptr, int ithr, int m_blk_idx,

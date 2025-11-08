@@ -48,7 +48,7 @@ using namespace dnnl::impl::prop_kind;
 using namespace dnnl::impl::utils;
 
 template <cpu_isa_t isa_>
-jit_sve_1x1_conv_kernel<isa_>::jit_sve_1x1_conv_kernel(
+jit_sve_1x1_conv_kernel_t<isa_>::jit_sve_1x1_conv_kernel_t(
         const jit_1x1_conv_conf_t &ajcp, const primitive_attr_t &attr,
         const memory_desc_t &dst_md)
     : jcp(ajcp), attr_(attr) {
@@ -75,7 +75,7 @@ jit_sve_1x1_conv_kernel<isa_>::jit_sve_1x1_conv_kernel(
 }
 
 template <cpu_isa_t isa_>
-void jit_sve_1x1_conv_kernel<isa_>::bcast_loop(int load_loop_blk) {
+void jit_sve_1x1_conv_kernel_t<isa_>::bcast_loop(int load_loop_blk) {
 
     mov(aux1_reg_bcast_data, reg_bcast_data);
     mov(aux_reg_bcast_data, reg_bcast_data);
@@ -138,7 +138,7 @@ void jit_sve_1x1_conv_kernel<isa_>::bcast_loop(int load_loop_blk) {
 }
 
 template <cpu_isa_t isa_>
-Xbyak_aarch64::XReg jit_sve_1x1_conv_kernel<isa_>::output_ptr(
+Xbyak_aarch64::XReg jit_sve_1x1_conv_kernel_t<isa_>::output_ptr(
         const bool is_out_layout_nxc, const int i_load, const int i_ur,
         Xbyak_aarch64::XReg addr) {
     if (one_of(jcp.prop_kind, forward_training, forward_inference,
@@ -180,7 +180,7 @@ static void iterate(const int load_loop_blk, const int ur, const F &fun) {
 }
 
 template <cpu_isa_t isa_>
-void jit_sve_1x1_conv_kernel<isa_>::apply_postops(
+void jit_sve_1x1_conv_kernel_t<isa_>::apply_postops(
         const bool is_out_layout_nxc, const int load_loop_blk, const int ur) {
     injector_utils::vmm_index_set_t vmm_idxs;
     if (jcp.with_binary) {
@@ -214,7 +214,7 @@ void jit_sve_1x1_conv_kernel<isa_>::apply_postops(
 }
 
 template <cpu_isa_t isa_>
-void jit_sve_1x1_conv_kernel<isa_>::reduce_loop(
+void jit_sve_1x1_conv_kernel_t<isa_>::reduce_loop(
         int load_loop_blk, int ur, int substep, bool wraparound) {
 
     const bool out_layout_nxc = is_out_layout_nxc(jcp);
@@ -451,7 +451,7 @@ void jit_sve_1x1_conv_kernel<isa_>::reduce_loop(
 }
 
 template <cpu_isa_t isa_>
-void jit_sve_1x1_conv_kernel<isa_>::generate() {
+void jit_sve_1x1_conv_kernel_t<isa_>::generate() {
     preamble();
 
     sub_imm(X_SP, X_SP, stack_space_needed, X_TMP_0);
@@ -614,7 +614,7 @@ void jit_sve_1x1_conv_kernel<isa_>::generate() {
 }
 
 template <cpu_isa_t isa_>
-status_t jit_sve_1x1_conv_kernel<isa_>::init_conf(jit_1x1_conv_conf_t &jcp,
+status_t jit_sve_1x1_conv_kernel_t<isa_>::init_conf(jit_1x1_conv_conf_t &jcp,
         const convolution_desc_t &cd, const memory_desc_wrapper &src_d,
         const memory_desc_wrapper &weights_d, const memory_desc_wrapper &dst_d,
         const primitive_attr_t &attr, int nthreads, bool reduce_src) {
@@ -732,7 +732,16 @@ status_t jit_sve_1x1_conv_kernel<isa_>::init_conf(jit_1x1_conv_conf_t &jcp,
             required_dat_tag = is_data_layout_nxc ? dat_tag_nxc : dat_tag_nCx8c;
             break;
         }
-        default: break;
+        case sve_128: {
+            const auto dat_tag_nCx4c = pick(ndims - 3, nCw4c, nChw4c, nCdhw4c);
+            jcp.src_tag = src_d.matches_one_of_tag(dat_tag_nxc, dat_tag_nCx4c);
+            jcp.dst_tag = dst_d.matches_one_of_tag(dat_tag_nxc, dat_tag_nCx4c);
+            is_data_layout_nxc
+                    = utils::everyone_is(dat_tag_nxc, jcp.src_tag, jcp.dst_tag);
+            required_dat_tag = is_data_layout_nxc ? dat_tag_nxc : dat_tag_nCx4c;
+            break;
+        }
+        default: return status::unimplemented;
     }
     /* Channel padding check */
     bool ok_to_pad_channels = true && !is_data_layout_nxc && jcp.ngroups == 1
@@ -776,7 +785,11 @@ status_t jit_sve_1x1_conv_kernel<isa_>::init_conf(jit_1x1_conv_conf_t &jcp,
             jcp.ver = ver_sve_256;
             break;
         }
-        default: break;
+        case sve_128: {
+            jcp.ver = ver_sve_128;
+            break;
+        }
+        default: return status::unimplemented;
     }
 
     if (everyone_is(data_type::f32, src_d.data_type(), weights_d.data_type(),
@@ -804,14 +817,21 @@ status_t jit_sve_1x1_conv_kernel<isa_>::init_conf(jit_1x1_conv_conf_t &jcp,
                                 OIhw8i8o, IOhw8o8i, OIdhw8i8o, IOdhw8o8i);
                 break;
             }
-            default: break;
+            case sve_128: {
+                wei_tag = with_groups
+                        ? pick(2 * ndims - 6 + is_bwd_d, gOIw4i4o, gIOw4o4i,
+                                gOIhw4i4o, gIOhw4o4i, gOIdhw4i4o, gIOdhw4o4i)
+                        : pick(2 * ndims - 6 + is_bwd_d, OIw4i4o, IOw4o4i,
+                                OIhw4i4o, IOhw4o4i, OIdhw4i4o, IOdhw4o4i);
+                break;
+            }
+            default: return status::unimplemented;
         }
 
         jcp.wei_tag = weights_d.matches_one_of_tag(wei_tag);
 
         if (jcp.wei_tag != wei_tag) return status::unimplemented;
 
-        //        jcp.fma_step = 1;
         jcp.typesize_in = sizeof(prec_traits_t<data_type::f32>::type);
         jcp.typesize_out = sizeof(prec_traits_t<data_type::f32>::type);
     } else {
@@ -1295,7 +1315,7 @@ status_t jit_sve_1x1_conv_kernel<isa_>::init_conf(jit_1x1_conv_conf_t &jcp,
     return status::success;
 }
 template <cpu_isa_t isa_>
-void jit_sve_1x1_conv_kernel<isa_>::init_scratchpad(
+void jit_sve_1x1_conv_kernel_t<isa_>::init_scratchpad(
         memory_tracking::registrar_t &scratchpad,
         const jit_1x1_conv_conf_t &jcp) {
 
@@ -1324,7 +1344,7 @@ void jit_sve_1x1_conv_kernel<isa_>::init_scratchpad(
 
 /* BWD W*/
 template <cpu_isa_t isa_>
-void jit_sve_1x1_conv_kernel<isa_>::balance(jit_1x1_conv_conf_t &jcp) {
+void jit_sve_1x1_conv_kernel_t<isa_>::balance(jit_1x1_conv_conf_t &jcp) {
     int nthreads = jcp.nthr;
     // initialize jcp reduction threading properties
     jcp.nthr = jcp.nthr_mb = jcp.nthr_g = jcp.nthr_oc_b = jcp.nthr_ic_b = 1;
@@ -1390,8 +1410,9 @@ void jit_sve_1x1_conv_kernel<isa_>::balance(jit_1x1_conv_conf_t &jcp) {
     assert(jcp.nthr <= nthreads);
 }
 
-template struct jit_sve_1x1_conv_kernel<sve_512>;
-template struct jit_sve_1x1_conv_kernel<sve_256>;
+template struct jit_sve_1x1_conv_kernel_t<sve_512>;
+template struct jit_sve_1x1_conv_kernel_t<sve_256>;
+template struct jit_sve_1x1_conv_kernel_t<sve_128>;
 } // namespace aarch64
 } // namespace cpu
 } // namespace impl

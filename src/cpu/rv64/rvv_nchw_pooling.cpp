@@ -19,6 +19,7 @@
 #include <riscv_vector.h>
 
 #include "common/dnnl_thread.hpp"
+#include "common/stream.hpp"
 #include "cpu/rv64/rvv_nchw_pooling.hpp"
 
 namespace dnnl {
@@ -263,15 +264,13 @@ void AvgPoolingExcludePadding(const float *src, float *dst, const dim_t batch,
 }
 } // namespace
 
-template <data_type_t d_type>
-riscv_nchw_pooling_fwd_t<d_type>::riscv_nchw_pooling_fwd_t(const pd_t *apd)
+riscv_nchw_pooling_fwd_t::riscv_nchw_pooling_fwd_t(const pd_t *apd)
     : primitive_t(apd) {}
 
-template <>
-status_t riscv_nchw_pooling_fwd_t<data_type::f32>::execute_forward(
+status_t riscv_nchw_pooling_fwd_t::execute_forward(
         const exec_ctx_t &ctx) const {
-    auto src = CTX_IN_MEM(const data_t *, DNNL_ARG_SRC);
-    auto dst = CTX_OUT_MEM(data_t *, DNNL_ARG_DST);
+    auto src = CTX_IN_MEM(const float *, DNNL_ARG_SRC);
+    auto dst = CTX_OUT_MEM(float *, DNNL_ARG_DST);
 
     const memory_desc_wrapper src_d(pd()->src_md());
     const memory_desc_wrapper dst_d(pd()->dst_md());
@@ -316,10 +315,13 @@ status_t riscv_nchw_pooling_fwd_t<data_type::f32>::execute_forward(
         return status::unimplemented;
     }
 
+    const post_ops_t &post_ops = pd()->attr()->post_ops_;
+    if (post_ops.len() == 1 && post_ops.entry_[0].is_binary()) {
+        CHECK(pd()->postops_.execute(ctx, dst, dst));
+    }
+
     return status::success;
 }
-
-template struct riscv_nchw_pooling_fwd_t<data_type::f32>;
 
 } // namespace rv64
 } // namespace cpu

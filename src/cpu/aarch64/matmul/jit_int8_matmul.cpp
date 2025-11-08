@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2025 FUJITSU LIMITED
+* Copyright 2025 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -53,7 +54,7 @@
 #define LDR_IMM(reg, addr, off) \
     { \
         const uint64_t IMM12_MASK = ~uint64_t(0xfff); \
-        if ((off & IMM12_MASK) == 0) { \
+        if (((off)&IMM12_MASK) == 0) { \
             ldr(reg, ptr(addr, off)); \
         } else { \
             add_imm(X_DEFAULT_ADDR, addr, off, X_TMP_0); \
@@ -80,7 +81,7 @@ using namespace nstl;
 
 using namespace data_type;
 
-struct jit_int8_matmul_kernel_t : public jit_generator {
+struct jit_int8_matmul_kernel_t : public jit_generator_t {
 
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_int8_matmul_kernel_t)
 
@@ -120,11 +121,11 @@ struct jit_int8_matmul_kernel_t : public jit_generator {
     call_params_t inp;
 
     void operator()(const call_params_t *p) {
-        return jit_generator::operator()(p);
+        return jit_generator_t::operator()(p);
     }
 
     ZReg loadb(int ld) { return ZReg(ld + 1); }
-    ZReg acc(int bd, int ld) {
+    ZReg acc(int bd, int ld) const {
         return ZReg(bd * brg_.ld_block + ld + brg_.ld_block + 1);
     }
     void zero_regs() {
@@ -1034,7 +1035,7 @@ status_t jit_int8_matmul_t::execute(const exec_ctx_t &ctx) const {
     const auto &b = pd()->get_b();
     const auto &d = pd()->get_d();
 
-    auto &scratchpad = ctx.get_scratchpad_grantor();
+    const auto &scratchpad = ctx.get_scratchpad_grantor();
 
     int num_threads = dnnl_get_current_num_threads();
     char *src = scratchpad.template get<char>(key_brgemm_primitive_buffer_a);
