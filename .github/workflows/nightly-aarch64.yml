@@ -17,14 +17,14 @@
 
 name: "Nightly AArch64"
 
-on:
-  #* allow manual trigger of workflow when needed. Useful for a nightly.
-  workflow_dispatch:
-  schedule:
-    #* minute (0-59) hour (0-23) day (1-31) month (1-12)  day of the week (0 - 6)
-    #* cron jobs run on the default (main) branch.
-    #* set to run at 5am UCT
-  - cron: "0 5 * * *"
+# on:
+#  #* allow manual trigger of workflow when needed. Useful for a nightly.
+#  workflow_dispatch:
+#  schedule:
+#    #* minute (0-59) hour (0-23) day (1-31) month (1-12)  day of the week (0 - 6)
+#    #* cron jobs run on the default (main) branch.
+#    #* set to run at 5am UCT
+#  - cron: "0 5 * * *"
 
 #* Stop stale workflows, though we should never hit this unless it hangs for a whole day.
 concurrency:
